@@ -20,6 +20,8 @@ eframe = { version = "0.33.0", default-features = false, features = [
     "wayland",       # To support Linux (and CI)
     "x11",           # To support older Linux distributions (restores one of the default features)
 ] }
+glam = "0.27.0"
+rayon = "1.10.0"
 log = "0.4.27"
 
 # You only need serde if you want app persistence:
