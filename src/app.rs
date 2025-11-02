@@ -1,68 +1,114 @@
 use egui::{Color32, Pos2, Slider, Vec2, vec2};
-// C++의 glm 라이브러리 대신 glam 크레이트를 사용합니다.
+// C++의 glm 대신 glam 크레이트 사용
 use glam::{Vec3, vec3};
 
-// C++의 Ray, Hit, Sphere, Raytracer 클래스에 해당하는 Rust 구조체들을 정의합니다.
+// Ray, Hit, Sphere, Raytracer Rust 구조체 정의
 
-/// 광선의 시작점으로부터 충돌 지점까지의 정보를 담습니다.
+/// 광선 충돌 정보
 struct Hit {
-    /// 광선의 시작점부터 충돌 지점까지의 거리. 음수이면 충돌하지 않음을 의미합니다.
+    /// 광선 시작점부터 충돌 지점까지의 거리 (음수: 충돌 없음)
     distance: f32,
-    /// 광선과 구가 충돌한 지점의 3D 월드 좌표.
+    /// 충돌 지점 (3D 월드 좌표)
     point: Vec3,
-    /// 충돌 지점에서 구 표면의 법선 벡터(normal vector).
+    /// 충돌 지점의 법선 벡터 (normal)
     normal: Vec3,
 }
 
-/// 3D 공간 상의 광선을 나타냅니다.
+/// 3D 공간의 광선
 struct Ray {
-    /// 광선의 시작점 (origin).
+    /// 광선 시작점
     origin: Vec3,
-    /// 광선의 방향 벡터 (direction). 단위 벡터여야 합니다.
+    /// 광선 방향 벡터(단위 벡터)
     direction: Vec3,
 }
 
-/// 3D 공간 상의 구를 나타냅니다.
+/// 3D 공간의 구
 struct Sphere {
     center: Vec3,
     radius: f32,
-    color: Vec3, // f32 기반 벡터로 색상을 다루면 계산이 편리합니다.
+    color: Vec3, // f32 벡터 색상이 계산에 편리
 }
 
 impl Sphere {
-    /// 주어진 광선(ray)과 구의 충돌을 계산합니다.
-    ///
-    /// # Arguments
-    /// * `ray` - 충돌을 검사할 광선.
-    ///
-    /// # Returns
-    /// * `Hit` - 충돌 정보를 담은 구조체. 충돌하지 않으면 `distance`가 음수인 `Hit`이 반환됩니다.
-    ///
-    /// # 수학적 원리
-    /// 광선의 방정식: P(t) = origin + t * direction
-    /// 구의 방정식: ||P - center||² = radius²
-    ///
-    /// 위 두 식을 결합하여 t에 대한 2차 방정식을 만듭니다: At² + Bt + C = 0
-    /// A = direction · direction (direction이 단위 벡터이므로 1)
-    /// B = 2 * direction · (origin - center)
-    /// C = (origin - center) · (origin - center) - radius²
-    ///
-    /// 판별식(nabla): (B/2)² - C >= 0 이면 실근(충돌점)이 존재합니다.
+    /*
+    IntersectionRayCollision
+
+    레이트레이싱(광추적기)이 뭔지 그 틀을 알고
+    3차원 구 그리기
+    3차원 구를 그리기 위해서는 세가지를 구현해야한다
+    1.광선과 구의 충돌
+    2.조명효과
+    3.원근투영
+
+    그중에 오늘은 광선과 구의 충돌을 먼저 한다
+
+    ---
+    가상의 공간과 가상의 구를 만들고
+    모니터 픽셀에서부터 수직으로 쏜 광선이 물체를 만났을때 그 색으로 픽셀의 색을 결정한다.
+    그러면 눈으로 이 위치에 물체가 있다고 화면으로 볼 수 있게 된다
+    컨트롤러에서 2차원 좌표를 받아서 3차원 좌표로 변환한다
+
+    충돌(접점) 계산함수
+    빛이 구를 통과하는 경우
+    1)통과하지 않는 경우
+    2)통과가 한번만 이뤄지는 경우
+    3)통과가 두번 이뤄지는 경우
+
+    ### 구
+    구의 방정식(x, c는 3차원벡터)
+    $||x - c||^2 = r^2$
+
+    ### 광선
+    직선의 방정식
+    x = o + du
+    x: 직선의 점들
+    o: 광선의 시작점
+    d: 선과의 거리
+    u: 광선의 방향
+
+    거리를 얼마나 가면 충돌을 하는지 d를 찾는것이 목표다
+
+    ### 풀이
+    접하는 지점을 찾으려면 구의 방정식의 x와 직선의 방정식 x가 같아지는 점을 찾으면 된다.
+
+    x를 o+du로 치환하면
+    $$||o+ du - c||^2 = r^2$$
+    이 식을 d에 대해 전개하면
+    d에 대한 2차방정식이 된다
+    $$ad^2 + bd + c = 0$$
+    이때
+    a는 단위벡터니까 계산 안해도 되고 b와 c를 통해 근의공식으로 계산하면 된다
+
+    계산해보면
+    d = $-[u \cdot(o-c)] \pm \sqrt{\nabla}$
+    $\nabla = (o-c)^2 - (||o-c||^2 - r^2)$
+    이 공식을 코드로 구현하면 된다
+
+    이 판별식 $\nabla$에 따라
+    $\nabla < 0$: 충돌하지 않음
+    $\nabla = 0$: 1점 충돌(구의 접선)
+    $\nabla > 0$: 2점 충돌(구 통과)
+    이므로
+    $\nabla \geq 0$ 일때 구와의 거리 d를 계산하면 된다.
+
+    0보다 작을 경우에는 d를 계산하지 않는다
+    또한 $\nabla \geq 0$ 이더라도 d가 음수이면 충돌지점이 광선의 출발점 뒤에 있는것이므로 계산하지 않는다
+
+     */
     fn intersect_ray_collision(&self, ray: &Ray) -> Hit {
-        // origin - center 벡터. 자주 사용되므로 변수에 저장합니다.
+        // origin - center 벡터, 자주 사용되므로 변수 저장
         let oc = ray.origin - self.center;
 
-        // a = ray.direction.dot(ray.direction) 이지만, direction이 단위벡터이므로 a는 1.0 입니다.
-        // 따라서 2차 방정식은 t² + 2 * (d·oc)t + oc² - r² = 0 이 됩니다.
-        // b = 2 * (d·oc) 이고, c = oc² - r² 입니다.
-        // 근의 공식에서 b 대신 b/2 (half_b)를 사용하면 계산이 간결해집니다.
+        // a = 1 (ray.direction은 단위 벡터)
+        // 2차 방정식: t² + 2(d·oc)t + oc² - r² = 0
+        // b/2 (half_b)를 사용하면 계산 간결화
         let half_b = ray.direction.dot(oc);
         let c = oc.length_squared() - self.radius * self.radius;
 
-        // 판별식 (nabla) = (b/2)² - ac. 여기서 a=1 이므로 (b/2)² - c 입니다.
+        // 판별식 (nabla) = (b/2)² - c (a=1 이므로)
         let discriminant = half_b * half_b - c;
 
-        // 판별식이 0보다 작으면 광선이 구와 만나지 않습니다.
+        // 판별식이 0보다 작으면 실근 없음 (충돌 안 함)
         if discriminant < 0.0 {
             return Hit {
                 distance: -1.0,
@@ -71,19 +117,19 @@ impl Sphere {
             };
         }
 
-        // 두 개의 실근(충돌 거리)을 계산합니다.
-        // 광선이 구를 뚫고 들어가는 지점과 나가는 지점에 해당합니다.
+        // 두 실근(충돌 거리) 계산
+        // 광선이 구에 들어가는 지점과 나가는 지점
         let sqrt_discriminant = discriminant.sqrt();
         let t1 = -half_b - sqrt_discriminant;
         let t2 = -half_b + sqrt_discriminant;
 
-        // 두 근 중 더 작은 양수 값이 카메라에 더 가까운 충돌점입니다.
+        // 두 근 중 더 작은 양수 값이 카메라에 가까운 충돌점
         let distance = if t1 >= 0.0 {
             t1
         } else if t2 >= 0.0 {
             t2
         } else {
-            // 두 근 모두 음수이면, 충돌 지점이 광선의 시작점 뒤에 있다는 의미이므로 충돌하지 않은 것으로 처리합니다.
+            // 두 근 모두 음수이면 광선위 시작점 뒤쪽이므로 충돌 아님
             -1.0
         };
 
@@ -95,7 +141,7 @@ impl Sphere {
             };
         }
 
-        // 충돌 정보를 계산하여 Hit 구조체를 채웁니다.
+        // 충돌 정보 계산 및 반환
         let point = ray.origin + ray.direction * distance;
         let normal = (point - self.center).normalize();
         Hit {
@@ -106,7 +152,7 @@ impl Sphere {
     }
 }
 
-/// 레이트레이싱 계산을 담당합니다.
+/// 레이트레이싱 계산 담당
 struct Raytracer {
     width: i32,
     height: i32,
@@ -121,12 +167,12 @@ impl Raytracer {
             sphere: Sphere {
                 center: vec3(0.0, 0.0, 0.5),
                 radius: 0.4,
-                color: vec3(1.0, 1.0, 1.0), // C++ 예제와 동일하게 흰색으로 시작
+                color: vec3(1.0, 1.0, 1.0), // 흰색
             },
         }
     }
 
-    /// 2D 스크린 좌표를 3D 월드 좌표로 변환합니다.
+    /// 2D 스크린 좌표를 3D 월드 좌표로 변환
     fn transform_screen_to_world(&self, pos_screen: Vec2) -> Vec3 {
         let x_scale = 2.0 / (self.width - 1) as f32;
         let y_scale = 2.0 / (self.height - 1) as f32;
@@ -140,7 +186,7 @@ impl Raytracer {
         )
     }
 
-    /// 주어진 광선을 추적하여 최종 색상을 계산합니다.
+    /// 주어진 광선을 추적해 최종 색상 계산
     fn trace_ray(&self, ray: &Ray) -> Vec3 {
         let hit = self.sphere.intersect_ray_collision(ray);
 
@@ -148,12 +194,12 @@ impl Raytracer {
             // 충돌하지 않으면 검은색 반환
             vec3(0.0, 0.0, 0.0)
         } else {
-            // C++ 예제처럼 깊이(distance)를 곱해 입체감을 표현합니다.
+            // C++ 예제처럼 깊이(distance)를 곱해 입체감 표현
             self.sphere.color * hit.distance
         }
     }
 
-    /// 모든 픽셀에 대해 레이트레이싱을 수행하여 픽셀 버퍼를 채웁니다.
+    /// 모든 픽셀에 대해 레이트레이싱을 수행해 픽셀 버퍼를 채움
     fn render(&self, pixels: &mut [Color32]) {
         // rayon을 사용해 병렬 처리 (C++의 #pragma omp parallel for와 유사)
         use rayon::prelude::*;
@@ -165,17 +211,17 @@ impl Raytracer {
             let pos_world = self
                 .transform_screen_to_world(vec2(i as f32, j as f32));
 
-            // Orthographic projection (정투영): 모든 광선이 z축 방향으로 평행하게 나아갑니다.
+            // Orthographic projection (정투영): 모든 광선이 z축으로 평행하게 나아감
             let ray_dir = vec3(0.0, 0.0, 1.0);
             let pixel_ray = Ray {
                 origin: pos_world,
                 direction: ray_dir,
             };
 
-            // 광선을 추적하여 색상을 계산합니다.
+            // 광선을 추적해 색상 계산
             let color_vec = self.trace_ray(&pixel_ray);
 
-            // 계산된 색상(Vec3, 0.0~1.0)을 Color32(u8, 0~255)로 변환합니다.
+            // 계산된 색상(Vec3, 0.0~1.0)을 Color32(u8, 0~255)로 변환
             *pixel = Color32::from_rgb(
                 (color_vec.x.clamp(0.0, 1.0) * 255.0) as u8,
                 (color_vec.y.clamp(0.0, 1.0) * 255.0) as u8,
@@ -188,7 +234,7 @@ impl Raytracer {
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TemplateApp {
-    // serde(skip)은 이 필드를 저장/로드 상태에서 제외시킵니다.
+    // serde(skip): 저장/로드 상태에서 제외
     #[serde(skip)]
     raytracer: Raytracer,
 
@@ -197,7 +243,7 @@ pub struct TemplateApp {
     center_y: f32,
     center_z: f32,
     radius: f32,
-    // egui의 Color32는 [u8; 4] 이므로, f32 기반 색상과 변환이 필요합니다.
+    // egui의 color_edit_button_rgb는 [f32; 3] 타입을 사용
     color: [f32; 3],
 }
 
@@ -250,7 +296,7 @@ impl eframe::App for TemplateApp {
         ctx: &egui::Context,
         _frame: &mut eframe::Frame,
     ) {
-        // UI 컨트롤러 값들을 실제 Raytracer의 Sphere 데이터에 반영합니다.
+        // UI 컨트롤러 값을 Raytracer의 Sphere 데이터에 반영
         self.raytracer.sphere.center.x = self.center_x;
         self.raytracer.sphere.center.y = self.center_y;
         self.raytracer.sphere.center.z = self.center_z;
@@ -276,7 +322,7 @@ impl eframe::App for TemplateApp {
                     .text("Radius"),
             );
             ui.label("Color:");
-            // color_edit_button_rgb는 [u8; 3]을 받으므로, f32 슬라이더로 대체합니다.
+            // color_edit_button_rgb는 [f32; 3] 타입의 슬라이서를 사용
             ui.color_edit_button_rgb(&mut self.color);
         });
 
@@ -284,23 +330,23 @@ impl eframe::App for TemplateApp {
             let width = self.raytracer.width as usize;
             let height = self.raytracer.height as usize;
 
-            // 1. 픽셀 데이터를 담을 버퍼를 생성합니다.
+            // 1. 픽셀 데이터를 담을 버퍼 생성
             let mut pixels: Vec<Color32> = vec![
                     consts::DEFAULT_BACKGROUND_COLOR;
                     width * height
                 ];
 
-            // 2. Raytracer가 픽셀 버퍼를 채웁니다. (CPU 렌더링)
+            // 2. Raytracer가 픽셀 버퍼를 채움 (CPU 렌더링)
             self.raytracer.render(&mut pixels);
 
-            // 3. 픽셀 데이터로 egui::ColorImage를 생성합니다.
+            // 3. 픽셀 데이터로 이미지 생성
             let image = egui::ColorImage {
                 size: [width, height],
                 source_size: vec2(width as f32, height as f32), // 이 줄을 추가합니다.
                 pixels,
             };
 
-            // 4. ColorImage를 GPU 텍스처로 로드하고 화면에 그립니다.
+            // 4. ColorImage를 GPU 텍스처로 로드하고 화면에 그림
             let texture = ctx.load_texture(
                 "sphere_canvas",
                 image,
@@ -309,7 +355,7 @@ impl eframe::App for TemplateApp {
             ui.image((texture.id(), texture.size_vec2()));
         });
 
-        // UI가 변경되면 지속적으로 화면을 다시 그리도록 요청합니다.
+        // UI 변경 시 화면을 다시 그리도록 요청
         ctx.request_repaint();
     }
 }
