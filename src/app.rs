@@ -1,4 +1,4 @@
-use egui::{Color32, Pos2, Slider, Vec2, vec2};
+use egui::{Color32, Slider, Vec2, vec2};
 // C++의 glm 대신 glam 크레이트 사용
 use glam::{Vec3, vec3};
 
@@ -26,87 +26,43 @@ struct Ray {
 struct Sphere {
     center: Vec3,
     radius: f32,
-    color: Vec3, // f32 벡터 색상이 계산에 편리
+    // 퐁 리플렉션 모델을 위한 재질(material) 속성
+    /// 주변광(Ambient) 색상
+    amb: Vec3,
+    /// 확산광(Diffuse) 색상
+    diff: Vec3,
+    /// 반사광(Specular) 색상
+    spec: Vec3,
+    /// 반사광 계수 (specular coefficient)
+    ks: f32,
+    /// 반사광 지수 (shininess)
+    alpha: f32,
 }
 
 impl Sphere {
-    /*
-    IntersectionRayCollision
-
-    레이트레이싱(광추적기)이 뭔지 그 틀을 알고
-    3차원 구 그리기
-    3차원 구를 그리기 위해서는 세가지를 구현해야한다
-    1.광선과 구의 충돌
-    2.조명효과
-    3.원근투영
-
-    그중에 오늘은 광선과 구의 충돌을 먼저 한다
-
-    ---
-    가상의 공간과 가상의 구를 만들고
-    모니터 픽셀에서부터 수직으로 쏜 광선이 물체를 만났을때 그 색으로 픽셀의 색을 결정한다.
-    그러면 눈으로 이 위치에 물체가 있다고 화면으로 볼 수 있게 된다
-    컨트롤러에서 2차원 좌표를 받아서 3차원 좌표로 변환한다
-
-    충돌(접점) 계산함수
-    빛이 구를 통과하는 경우
-    1)통과하지 않는 경우
-    2)통과가 한번만 이뤄지는 경우
-    3)통과가 두번 이뤄지는 경우
-
-    ### 구
-    구의 방정식(x, c는 3차원벡터)
-    $||x - c||^2 = r^2$
-
-    ### 광선
-    직선의 방정식
-    x = o + du
-    x: 직선의 점들
-    o: 광선의 시작점
-    d: 선과의 거리
-    u: 광선의 방향
-
-    거리를 얼마나 가면 충돌을 하는지 d를 찾는것이 목표다
-
-    ### 풀이
-    접하는 지점을 찾으려면 구의 방정식의 x와 직선의 방정식 x가 같아지는 점을 찾으면 된다.
-
-    x를 o+du로 치환하면
-    $$||o+ du - c||^2 = r^2$$
-    이 식을 d에 대해 전개하면
-    d에 대한 2차방정식이 된다
-    $$ad^2 + bd + c = 0$$
-    이때
-    a는 단위벡터니까 계산 안해도 되고 b와 c를 통해 근의공식으로 계산하면 된다
-
-    계산해보면
-    d = $-[u \cdot(o-c)] \pm \sqrt{\nabla}$
-    $\nabla = (o-c)^2 - (||o-c||^2 - r^2)$
-    이 공식을 코드로 구현하면 된다
-
-    이 판별식 $\nabla$에 따라
-    $\nabla < 0$: 충돌하지 않음
-    $\nabla = 0$: 1점 충돌(구의 접선)
-    $\nabla > 0$: 2점 충돌(구 통과)
-    이므로
-    $\nabla \geq 0$ 일때 구와의 거리 d를 계산하면 된다.
-
-    0보다 작을 경우에는 d를 계산하지 않는다
-    또한 $\nabla \geq 0$ 이더라도 d가 음수이면 충돌지점이 광선의 출발점 뒤에 있는것이므로 계산하지 않는다
-
-     */
+    /// 광선과 구의 충돌 계산
+    ///
+    /// # 매개변수
+    /// ray - 충돌 검사할 광선
+    ///
+    /// # 리턴
+    /// Hit - 충돌 정보. 미충돌 시 distance는 음수
+    ///
+    /// # 공식
+    /// 직선의 방정식: x = 시작점 + 거리 * 방향
+    /// 구의 방정식: ||x - 원의중심||² = 반지름²
+    ///
+    /// 두 식을 결합해 x에 대한 2차 방정식을 만듦: Ax² + Bx + C = 0
+    /// 판별식: (B/2)² - C >= 0 이면 실근(충돌점) 존재
     fn intersect_ray_collision(&self, ray: &Ray) -> Hit {
-        // origin - center 벡터, 자주 사용되므로 변수 저장
         let oc = ray.origin - self.center;
-
-        // a = 1 (ray.direction은 단위 벡터)
-        // 2차 방정식: t² + 2(d·oc)t + oc² - r² = 0
-        // b/2 (half_b)를 사용하면 계산 간결화
-        let half_b = ray.direction.dot(oc);
+        // C++ 코드의 2차 방정식 근의 공식과 동일한 로직으로 수정
+        // a는 ray.direction이 단위 벡터이므로 1.0
+        let b = 2.0 * ray.direction.dot(oc);
         let c = oc.length_squared() - self.radius * self.radius;
 
-        // 판별식 (nabla) = (b/2)² - c (a=1 이므로)
-        let discriminant = half_b * half_b - c;
+        // 판별식
+        let discriminant = b * b - 4.0 * c;
 
         // 판별식이 0보다 작으면 실근 없음 (충돌 안 함)
         if discriminant < 0.0 {
@@ -117,14 +73,13 @@ impl Sphere {
             };
         }
 
-        // 두 실근(충돌 거리) 계산
-        // 광선이 구에 들어가는 지점과 나가는 지점
+        // 충돌하는 경우 두 실근(충돌 거리) 계산
         let sqrt_discriminant = discriminant.sqrt();
-        let t1 = -half_b - sqrt_discriminant;
-        let t2 = -half_b + sqrt_discriminant;
+        let t1 = (-b - sqrt_discriminant) / 2.0;
+        let t2 = (-b + sqrt_discriminant) / 2.0;
 
         // 두 근 중 더 작은 양수 값이 카메라에 가까운 충돌점
-        let distance = if t1 >= 0.0 {
+        let distance = if t1 >= 0.0 && (t1 < t2 || t2 < 0.0) {
             t1
         } else if t2 >= 0.0 {
             t2
@@ -152,11 +107,17 @@ impl Sphere {
     }
 }
 
+/// 점 광원
+struct Light {
+    pos: Vec3,
+}
+
 /// 레이트레이싱 계산 담당
 struct Raytracer {
     width: i32,
     height: i32,
     sphere: Sphere,
+    light: Light,
 }
 
 impl Raytracer {
@@ -167,7 +128,14 @@ impl Raytracer {
             sphere: Sphere {
                 center: vec3(0.0, 0.0, 0.5),
                 radius: 0.4,
-                color: vec3(1.0, 1.0, 1.0), // 흰색
+                amb: vec3(0.0, 0.0, 0.0),
+                diff: vec3(0.0, 0.0, 1.0),
+                spec: vec3(1.0, 1.0, 1.0),
+                ks: 0.8,
+                alpha: 9.0,
+            },
+            light: Light {
+                pos: vec3(0.0, 0.0, -1.0),
             },
         }
     }
@@ -194,8 +162,25 @@ impl Raytracer {
             // 충돌하지 않으면 검은색 반환
             vec3(0.0, 0.0, 0.0)
         } else {
-            // C++ 예제처럼 깊이(distance)를 곱해 입체감 표현
-            self.sphere.color * hit.distance
+            // 퐁 리플렉션 모델로 조명 계산
+            // 1. Diffuse (확산광)
+            let dir_to_light =
+                (self.light.pos - hit.point).normalize();
+            let diff = hit.normal.dot(dir_to_light).max(0.0);
+
+            // 2. Specular (반사광)
+            let reflect_dir =
+                2.0 * hit.normal.dot(dir_to_light) * hit.normal
+                    - dir_to_light;
+            let specular = (-ray.direction)
+                .dot(reflect_dir)
+                .max(0.0)
+                .powf(self.sphere.alpha);
+
+            // 3. Ambient + Diffuse + Specular
+            self.sphere.amb
+                + self.sphere.diff * diff
+                + self.sphere.spec * specular * self.sphere.ks
         }
     }
 
@@ -243,8 +228,14 @@ pub struct TemplateApp {
     center_y: f32,
     center_z: f32,
     radius: f32,
-    // egui의 color_edit_button_rgb는 [f32; 3] 타입을 사용
-    color: [f32; 3],
+    light_x: f32,
+    light_y: f32,
+    light_z: f32,
+    amb_color: [f32; 3],
+    diff_color: [f32; 3],
+    spec_color: [f32; 3],
+    spec_coeff: f32,
+    spec_power: f32,
 }
 
 mod consts {
@@ -266,11 +257,14 @@ impl Default for TemplateApp {
             center_y: raytracer.sphere.center.y,
             center_z: raytracer.sphere.center.z,
             radius: raytracer.sphere.radius,
-            color: [
-                raytracer.sphere.color.x,
-                raytracer.sphere.color.y,
-                raytracer.sphere.color.z,
-            ],
+            light_x: raytracer.light.pos.x,
+            light_y: raytracer.light.pos.y,
+            light_z: raytracer.light.pos.z,
+            amb_color: raytracer.sphere.amb.to_array(),
+            diff_color: raytracer.sphere.diff.to_array(),
+            spec_color: raytracer.sphere.spec.to_array(),
+            spec_coeff: raytracer.sphere.ks,
+            spec_power: raytracer.sphere.alpha,
             raytracer,
         }
     }
@@ -296,12 +290,21 @@ impl eframe::App for TemplateApp {
         ctx: &egui::Context,
         _frame: &mut eframe::Frame,
     ) {
-        // UI 컨트롤러 값을 Raytracer의 Sphere 데이터에 반영
+        // UI 컨트롤러 값을 Raytracer 데이터에 반영
         self.raytracer.sphere.center.x = self.center_x;
         self.raytracer.sphere.center.y = self.center_y;
         self.raytracer.sphere.center.z = self.center_z;
         self.raytracer.sphere.radius = self.radius;
-        self.raytracer.sphere.color = Vec3::from_slice(&self.color);
+        self.raytracer.light.pos.x = self.light_x;
+        self.raytracer.light.pos.y = self.light_y;
+        self.raytracer.light.pos.z = self.light_z;
+        self.raytracer.sphere.amb = Vec3::from_slice(&self.amb_color);
+        self.raytracer.sphere.diff =
+            Vec3::from_slice(&self.diff_color);
+        self.raytracer.sphere.spec =
+            Vec3::from_slice(&self.spec_color);
+        self.raytracer.sphere.ks = self.spec_coeff;
+        self.raytracer.sphere.alpha = self.spec_power;
 
         egui::SidePanel::left("control_panel").show(ctx, |ui| {
             ui.heading("Sphere Controls");
@@ -321,9 +324,38 @@ impl eframe::App for TemplateApp {
                 Slider::new(&mut self.radius, 0.0..=1.0)
                     .text("Radius"),
             );
-            ui.label("Color:");
-            // color_edit_button_rgb는 [f32; 3] 타입의 슬라이서를 사용
-            ui.color_edit_button_rgb(&mut self.color);
+
+            ui.separator();
+            ui.heading("Light Controls");
+            ui.add(
+                Slider::new(&mut self.light_x, -2.0..=2.0)
+                    .text("Light X"),
+            );
+            ui.add(
+                Slider::new(&mut self.light_y, -2.0..=2.0)
+                    .text("Light Y"),
+            );
+            ui.add(
+                Slider::new(&mut self.light_z, -2.0..=2.0)
+                    .text("Light Z"),
+            );
+
+            ui.separator();
+            ui.heading("Material Controls");
+            ui.label("Ambient Color:");
+            ui.color_edit_button_rgb(&mut self.amb_color);
+            ui.label("Diffuse Color:");
+            ui.color_edit_button_rgb(&mut self.diff_color);
+            ui.label("Specular Color:");
+            ui.color_edit_button_rgb(&mut self.spec_color);
+            ui.add(
+                Slider::new(&mut self.spec_power, 0.0..=100.0)
+                    .text("Specular Power"),
+            );
+            ui.add(
+                Slider::new(&mut self.spec_coeff, 0.0..=1.0)
+                    .text("Specular Coeff"),
+            );
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -340,11 +372,10 @@ impl eframe::App for TemplateApp {
             self.raytracer.render(&mut pixels);
 
             // 3. 픽셀 데이터로 이미지 생성
-            let image = egui::ColorImage {
-                size: [width, height],
-                source_size: vec2(width as f32, height as f32), // 이 줄을 추가합니다.
-                pixels,
-            };
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [width, height],
+                bytemuck::cast_slice(&pixels),
+            );
 
             // 4. ColorImage를 GPU 텍스처로 로드하고 화면에 그림
             let texture = ctx.load_texture(

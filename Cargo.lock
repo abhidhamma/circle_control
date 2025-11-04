@@ -854,6 +854,7 @@ dependencies = [
 name = "eframe_template"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "eframe",
  "egui",
  "env_logger",
