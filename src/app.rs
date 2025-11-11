@@ -1,14 +1,8 @@
-// h:\coding\rustWorkspace\graphics\circle_control\src\app.rs
-
 use egui::{Color32, Slider, Vec2, vec2};
 use glam::{Vec3, vec3};
 use std::sync::Arc;
 
-// C++의 Object, Sphere, Light, Hit, Ray 클래스/구조체를 Rust의 struct로 번역합니다.
-// Rust에서는 상속 대신 Trait을 사용해 다형성을 구현합니다.
-
-// C++: class Object (가상함수 포함)
-// Rust: trait Object (동적 디스패치를 위해 Box<dyn Object> 또는 Arc<dyn Object>와 함께 사용)
+// trait 동적 디스패치를 위해 Box<dyn Object>, Arc<dyn Object> 사용
 trait Object: Send + Sync {
     fn check_ray_collision(&self, ray: &Ray) -> Hit;
     fn ambient(&self) -> Vec3;
@@ -17,23 +11,20 @@ trait Object: Send + Sync {
     fn alpha(&self) -> f32;
 }
 
-// C++: class Hit
+// Object, Sphere, Triangle, Light, Hit, Ray struct
 struct Hit {
     distance: f32,
     point: Vec3,
     normal: Vec3,
-    // C++: std::shared_ptr<Object> obj;
-    // Rust: 충돌한 객체의 재질 정보에 접근하기 위해 Arc<dyn Object>를 사용합니다.
+    // 충돌한 객체의 재질 정보
     object: Option<Arc<dyn Object>>,
 }
 
-// C++: class Ray
 struct Ray {
     origin: Vec3,
     direction: Vec3,
 }
 
-// C++: class Sphere : public Object
 struct Sphere {
     center: Vec3,
     radius: f32,
@@ -43,7 +34,6 @@ struct Sphere {
     alpha: f32,
 }
 
-// Sphere에 Object 트레이트를 구현합니다.
 impl Object for Sphere {
     fn check_ray_collision(&self, ray: &Ray) -> Hit {
         let oc = ray.origin - self.center;
@@ -87,7 +77,7 @@ impl Object for Sphere {
             distance,
             point,
             normal,
-            object: None, // 이 함수에서는 object 필드를 채우지 않습니다. FindClosestCollision에서 채웁니다.
+            object: None, // FindClosestCollision에서 object 넣기
         }
     }
 
@@ -105,61 +95,163 @@ impl Object for Sphere {
     }
 }
 
-// C++: class Light
+// 삼각형 struct
+struct Triangle {
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3,
+    amb: Vec3,
+    diff: Vec3,
+    spec: Vec3,
+    alpha: f32,
+}
+
+impl Triangle {
+    // 광선과 삼각형의 교점을 찾는 함수
+    fn intersect_ray_triangle(
+        &self,
+        ray: &Ray,
+    ) -> Option<(f32, Vec3, Vec3)> {
+        // 광원과 삼각형 사이의 거리를 구하기 위해
+        // 삼각형 평면의 수직벡터 찾기
+        let edge1 = self.v1 - self.v0;
+        let edge2 = self.v2 - self.v0;
+        let face_normal = edge1.cross(edge2).normalize();
+
+        // 뒷면제거(Back-face culling): 광선이 삼각형의 뒷면에서 온다면 충돌하지 않은 것으로 처리
+        if ray.direction.dot(face_normal) > 0.0 {
+            return None;
+        }
+
+        // 광선과 평면이 거의 평행한 경우, 충돌하지 않음 (0으로 나누기 방지)
+        if ray.direction.dot(face_normal).abs() < 1e-6 {
+            return None;
+        }
+
+        // 1. 광선과 삼각형이 있는 평면이 만나는 점과의 거리 t 찾기
+        /*
+           시점에서 쏘아진 광선이 삼각형 위의 점 p를 구하기
+
+           평면의 방정식: (p - v0) · n = 0
+           광선의 방정식: p = origin + t * direction
+           p 치환: (origin + t * direction - v0) · n = 0
+           t만 미지수이므로 t에 대한 식으로 바꾸기
+           t * (direction · n) = (v0 - origin) · n
+           t = ((v0 - origin) · n) / (direction · n)
+        */
+
+        let t = (self.v0 - ray.origin).dot(face_normal)
+            / ray.direction.dot(face_normal);
+
+        // 광선의 시작점(눈)보다 뒤에 삼각형이 있다면 충돌하지 않은 것
+        if t < 0.0 {
+            return None;
+        }
+
+        // 2. 교점이 삼각형 내부에 있는지 확인(Inside-Outside Test)
+        let point = ray.origin + t * ray.direction;
+
+        // 각 변에서 교점으로 향하는 벡터를 계산
+        // 오른손법칙에 의해 삼각형 내부에 있다면 수직벡터는 0보다 큼
+        let c0 = point - self.v0;
+        let c1 = point - self.v1;
+        let c2 = point - self.v2;
+
+        // (v1-v0) x (point-v0)의 결과 벡터가 face_normal과 같은 방향인지 확인
+        if face_normal.dot(edge1.cross(c0)) < 0.0 {
+            return None;
+        }
+        // (v2-v1) x (point-v1)
+        if face_normal.dot((self.v2 - self.v1).cross(c1)) < 0.0 {
+            return None;
+        }
+        // (v0-v2) x (point-v2)
+        if face_normal.dot((self.v0 - self.v2).cross(c2)) < 0.0 {
+            return None;
+        }
+
+        // 모든 테스트를 통과하면 교점은 삼각형 내부에 있음
+        Some((t, point, face_normal))
+    }
+}
+
+impl Object for Triangle {
+    fn check_ray_collision(&self, ray: &Ray) -> Hit {
+        if let Some((t, point, normal)) =
+            self.intersect_ray_triangle(ray)
+        {
+            Hit {
+                distance: t,
+                point,
+                normal,
+                object: None,
+            }
+        } else {
+            Hit {
+                distance: -1.0,
+                point: Vec3::ZERO,
+                normal: Vec3::ZERO,
+                object: None,
+            }
+        }
+    }
+
+    fn ambient(&self) -> Vec3 {
+        self.amb
+    }
+    fn diffuse(&self) -> Vec3 {
+        self.diff
+    }
+    fn specular(&self) -> Vec3 {
+        self.spec
+    }
+    fn alpha(&self) -> f32 {
+        self.alpha
+    }
+}
+
 struct Light {
     pos: Vec3,
 }
 
-// C++: class Raytracer
 struct Raytracer {
     width: i32,
     height: i32,
-    // C++: std::vector<shared_ptr<Object>> objects;
-    // Rust: 여러 타입의 Object를 담기 위해 Arc<dyn Object>의 벡터를 사용합니다.
     objects: Vec<Arc<dyn Object>>,
     light: Light,
 }
 
 impl Raytracer {
     fn new(width: i32, height: i32) -> Self {
-        // C++ 생성자에서 구 3개를 만들고 objects 벡터에 추가하는 로직과 동일합니다.
         let sphere1 = Arc::new(Sphere {
-            center: vec3(0.5, 0.0, 0.5),
+            center: vec3(0.6, 0.0, 0.5),
             radius: 0.4,
-            amb: vec3(0.2, 0.2, 0.2),
-            diff: vec3(1.0, 0.2, 0.2),
-            spec: vec3(0.5, 0.5, 0.5),
-            alpha: 10.0,
+            amb: vec3(0.1, 0.1, 0.1),
+            diff: vec3(1.0, 0.1, 0.1),
+            spec: vec3(1.0, 1.0, 1.0),
+            alpha: 50.0,
         });
-        let sphere2 = Arc::new(Sphere {
-            center: vec3(0.0, 0.0, 1.0),
-            radius: 0.4,
+
+        let triangle1 = Arc::new(Triangle {
+            v0: vec3(-2.0, -2.0, 2.0),
+            v1: vec3(-2.0, 2.0, 2.0),
+            v2: vec3(2.0, 2.0, 2.0),
             amb: vec3(0.2, 0.2, 0.2),
-            diff: vec3(0.2, 1.0, 0.2),
+            diff: vec3(0.5, 0.5, 0.5),
             spec: vec3(0.5, 0.5, 0.5),
-            alpha: 10.0,
-        });
-        let sphere3 = Arc::new(Sphere {
-            center: vec3(-0.5, 0.0, 1.5),
-            radius: 0.4,
-            amb: vec3(0.2, 0.2, 0.2),
-            diff: vec3(0.2, 0.2, 1.0),
-            spec: vec3(0.5, 0.5, 0.5),
-            alpha: 10.0,
+            alpha: 5.0,
         });
 
         Self {
             width,
             height,
-            objects: vec![sphere3, sphere2, sphere1],
+            objects: vec![sphere1, triangle1],
             light: Light {
                 pos: vec3(0.0, 1.0, -1.0),
             },
         }
     }
 
-    // C++: Hit FindClosestCollision(Ray& ray)
-    // 가장 가까운 충돌 지점을 찾는 로직입니다.
     fn find_closest_collision(&self, ray: &Ray) -> Hit {
         let mut closest_d = f32::MAX;
         let mut closest_hit = Hit {
@@ -173,7 +265,7 @@ impl Raytracer {
             let mut hit = object.check_ray_collision(ray);
             if hit.distance >= 0.0 && hit.distance < closest_d {
                 closest_d = hit.distance;
-                hit.object = Some(object.clone()); // 충돌한 객체의 참조를 저장합니다.
+                hit.object = Some(object.clone());
                 closest_hit = hit;
             }
         }
@@ -192,7 +284,6 @@ impl Raytracer {
         )
     }
 
-    // C++: vec3 traceRay(Ray &ray)
     fn trace_ray(&self, ray: &Ray) -> Vec3 {
         let hit = self.find_closest_collision(ray);
 
@@ -217,11 +308,9 @@ impl Raytracer {
         }
     }
 
-    // C++: void Render(std::vector<glm::vec4>& pixels)
     fn render(&self, pixels: &mut [Color32]) {
         use rayon::prelude::*;
 
-        // C++: const vec3 eyePos(0.0f, 0.0f, -1.5f);
         let eye_pos = vec3(0.0, 0.0, -1.5);
 
         pixels.par_iter_mut().enumerate().for_each(|(idx, pixel)| {
@@ -230,12 +319,9 @@ impl Raytracer {
 
             let pos_world = self
                 .transform_screen_to_world(vec2(i as f32, j as f32));
-
-            // C++: Ray pixelRay{ pixelPosWorld, normalize(pixelPosWorld - eyePos) };
-            // 원근 투영을 위해 시점에서 픽셀 위치를 향하는 광선을 생성합니다.
             let ray_dir = (pos_world - eye_pos).normalize();
             let pixel_ray = Ray {
-                origin: eye_pos, // 원근 투영에서는 광선이 시점에서 시작됩니다.
+                origin: eye_pos,
                 direction: ray_dir,
             };
 
@@ -250,7 +336,6 @@ impl Raytracer {
     }
 }
 
-// C++의 Example 클래스와 main 함수의 UI 로직을 TemplateApp으로 통합합니다.
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct TemplateApp {
@@ -306,7 +391,6 @@ impl eframe::App for TemplateApp {
         ctx: &egui::Context,
         _frame: &mut eframe::Frame,
     ) {
-        // UI 값 Raytracer에 반영
         self.raytracer.light.pos.x = self.light_x;
         self.raytracer.light.pos.y = self.light_y;
         self.raytracer.light.pos.z = self.light_z;
@@ -328,11 +412,14 @@ impl eframe::App for TemplateApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            let available_size = ui.available_size();
+            self.raytracer.width = available_size.x as i32;
+            self.raytracer.height = available_size.y as i32;
+
             let width = self.raytracer.width as usize;
             let height = self.raytracer.height as usize;
 
-            let mut pixels: Vec<Color32> =
-                vec![
+            let mut pixels: Vec<Color32> = vec![
                     consts::DEFAULT_BACKGROUND_COLOR;
                     width * height
                 ];
@@ -345,7 +432,7 @@ impl eframe::App for TemplateApp {
             );
 
             let texture = ctx.load_texture(
-                "sphere_canvas",
+                "raytrace_canvas",
                 image,
                 egui::TextureOptions::NEAREST,
             );
