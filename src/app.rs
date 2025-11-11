@@ -118,12 +118,14 @@ impl Triangle {
         let edge2 = self.v2 - self.v0;
         let face_normal = edge1.cross(edge2).normalize();
 
-        // 뒷면제거(Back-face culling): 광선이 삼각형의 뒷면에서 온다면 충돌하지 않은 것으로 처리
+        // 뒷면제거(Back-face culling): 두번그릴 필요 없으니까
+        // 광선이 삼각형의 뒷면에서 온다면 충돌하지 않은 것으로 처리
         if ray.direction.dot(face_normal) > 0.0 {
             return None;
         }
 
-        // 광선과 평면이 거의 평행한 경우, 충돌하지 않음 (0으로 나누기 방지)
+        // 광선과 평면이 거의 평행한 경우, 충돌하지 않음
+        // (0으로 나누면 에러나는것 방지)
         if ray.direction.dot(face_normal).abs() < 1e-6 {
             return None;
         }
@@ -157,7 +159,8 @@ impl Triangle {
         let c1 = point - self.v1;
         let c2 = point - self.v2;
 
-        // (v1-v0) x (point-v0)의 결과 벡터가 face_normal과 같은 방향인지 확인
+        // 벡터가 face_normal과 같은 방향인지 확인
+        // (v1-v0) x (point-v0)
         if face_normal.dot(edge1.cross(c0)) < 0.0 {
             return None;
         }
