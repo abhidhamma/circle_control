@@ -1,30 +1,37 @@
 use egui::{Color32, Slider, Vec2, vec2};
 use glam::{Vec3, vec3};
+use std::any::Any;
 use std::sync::Arc;
 
-// trait 동적 디스패치를 위해 Box<dyn Object>, Arc<dyn Object> 사용
-trait Object: Send + Sync {
+// Send + Sync는 여러 스레드에서 안전하게 공유 가능하도록 하는 제약 조건
+// Any 트레잇을 상속받아 다운캐스팅이 가능하도록 하기
+trait Object: Send + Sync + Any {
     fn check_ray_collision(&self, ray: &Ray) -> Hit;
     fn ambient(&self) -> Vec3;
     fn diffuse(&self) -> Vec3;
     fn specular(&self) -> Vec3;
     fn alpha(&self) -> f32;
+    // 다운캐스팅을 위한 as_any 메소드
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-// Object, Sphere, Triangle, Light, Hit, Ray struct
+// 광추적 충돌정보
 struct Hit {
     distance: f32,
     point: Vec3,
     normal: Vec3,
-    // 충돌한 객체의 재질 정보
+    // 충돌한 객체의 재질 정보를 가져오기 위해 Arc<dyn Object>를 저장
     object: Option<Arc<dyn Object>>,
 }
 
+// 광선
 struct Ray {
     origin: Vec3,
     direction: Vec3,
 }
 
+// 구
 struct Sphere {
     center: Vec3,
     radius: f32,
@@ -77,8 +84,15 @@ impl Object for Sphere {
             distance,
             point,
             normal,
-            object: None, // FindClosestCollision에서 object 넣기
+            object: None, // 실제 객체 정보는 find_closest_collision에서 채우기
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 
     fn ambient(&self) -> Vec3 {
@@ -95,7 +109,6 @@ impl Object for Sphere {
     }
 }
 
-// 삼각형 struct
 struct Triangle {
     v0: Vec3,
     v1: Vec3,
@@ -106,83 +119,53 @@ struct Triangle {
     alpha: f32,
 }
 
-impl Triangle {
-    // 광선과 삼각형의 교점을 찾는 함수
-    fn intersect_ray_triangle(
-        &self,
-        ray: &Ray,
-    ) -> Option<(f32, Vec3, Vec3)> {
-        // 광원과 삼각형 사이의 거리를 구하기 위해
-        // 삼각형 평면의 수직벡터 찾기
-        let edge1 = self.v1 - self.v0;
-        let edge2 = self.v2 - self.v0;
-        let face_normal = edge1.cross(edge2).normalize();
-
-        // 뒷면제거(Back-face culling): 두번그릴 필요 없으니까
-        // 광선이 삼각형의 뒷면에서 온다면 충돌하지 않은 것으로 처리
-        if ray.direction.dot(face_normal) > 0.0 {
-            return None;
-        }
-
-        // 광선과 평면이 거의 평행한 경우, 충돌하지 않음
-        // (0으로 나누면 에러나는것 방지)
-        if ray.direction.dot(face_normal).abs() < 1e-6 {
-            return None;
-        }
-
-        // 1. 광선과 삼각형이 있는 평면이 만나는 점과의 거리 t 찾기
-        /*
-           시점에서 쏘아진 광선이 삼각형 위의 점 p를 구하기
-
-           평면의 방정식: (p - v0) · n = 0
-           광선의 방정식: p = origin + t * direction
-           p 치환: (origin + t * direction - v0) · n = 0
-           t만 미지수이므로 t에 대한 식으로 바꾸기
-           t * (direction · n) = (v0 - origin) · n
-           t = ((v0 - origin) · n) / (direction · n)
-        */
-
-        let t = (self.v0 - ray.origin).dot(face_normal)
-            / ray.direction.dot(face_normal);
-
-        // 광선의 시작점(눈)보다 뒤에 삼각형이 있다면 충돌하지 않은 것
-        if t < 0.0 {
-            return None;
-        }
-
-        // 2. 교점이 삼각형 내부에 있는지 확인(Inside-Outside Test)
-        let point = ray.origin + t * ray.direction;
-
-        // 각 변에서 교점으로 향하는 벡터를 계산
-        // 오른손법칙에 의해 삼각형 내부에 있다면 수직벡터는 0보다 큼
-        let c0 = point - self.v0;
-        let c1 = point - self.v1;
-        let c2 = point - self.v2;
-
-        // 벡터가 face_normal과 같은 방향인지 확인
-        // (v1-v0) x (point-v0)
-        if face_normal.dot(edge1.cross(c0)) < 0.0 {
-            return None;
-        }
-        // (v2-v1) x (point-v1)
-        if face_normal.dot((self.v2 - self.v1).cross(c1)) < 0.0 {
-            return None;
-        }
-        // (v0-v2) x (point-v2)
-        if face_normal.dot((self.v0 - self.v2).cross(c2)) < 0.0 {
-            return None;
-        }
-
-        // 모든 테스트를 통과하면 교점은 삼각형 내부에 있음
-        Some((t, point, face_normal))
-    }
-}
-
 impl Object for Triangle {
     fn check_ray_collision(&self, ray: &Ray) -> Hit {
-        if let Some((t, point, normal)) =
-            self.intersect_ray_triangle(ray)
-        {
+        let edge1 = self.v1 - self.v0;
+        let edge2 = self.v2 - self.v0;
+        let h = ray.direction.cross(edge2);
+        let a = edge1.dot(h);
+
+        if a > -1e-6 && a < 1e-6 {
+            // 광선이 평면과 평행
+            return Hit {
+                distance: -1.0,
+                point: Vec3::ZERO,
+                normal: Vec3::ZERO,
+                object: None,
+            };
+        }
+
+        let f = 1.0 / a;
+        let s = ray.origin - self.v0;
+        let u = f * s.dot(h);
+
+        if u < 0.0 || u > 1.0 {
+            return Hit {
+                distance: -1.0,
+                point: Vec3::ZERO,
+                normal: Vec3::ZERO,
+                object: None,
+            };
+        }
+
+        let q = s.cross(edge1);
+        let v = f * ray.direction.dot(q);
+
+        if v < 0.0 || u + v > 1.0 {
+            return Hit {
+                distance: -1.0,
+                point: Vec3::ZERO,
+                normal: Vec3::ZERO,
+                object: None,
+            };
+        }
+
+        let t = f * edge2.dot(q);
+        if t > 1e-6 {
+            // 광선과의 교점
+            let point = ray.origin + ray.direction * t;
+            let normal = edge1.cross(edge2).normalize();
             Hit {
                 distance: t,
                 point,
@@ -199,6 +182,12 @@ impl Object for Triangle {
         }
     }
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
     fn ambient(&self) -> Vec3 {
         self.amb
     }
@@ -213,6 +202,83 @@ impl Object for Triangle {
     }
 }
 
+/*
+    사각형 그리기(Square 구조체)
+    Square는 두 개의 Triangle 객체로 사각형을 그림(has-a 관계)
+    Square 자체가 Object 트레잇을 구현하도록 하여, 외부에서는 이것이 사각형인지 삼각형인지 신경 쓸 필요 없이
+    check_ray_collision 함수를 호출할 수 있음(composition).
+    또한 square는 삼각형의 함수를 재사용해서 자신은 판단하는 로직만 작성함(deligation)
+
+    composition의 근본적인 이점: 유연성(낮은 결합도와 명확한 역할과 책임을 주면 유연해진다)
+    composition(구성)의 뉘앙스는 낮은 결합도를 통해 교체가능성을 확보한다는 조립의 의미
+    또한 유연함의 비교대상은 상속이고 상속(is-a관계)보다 유연해진다는 것이다.
+    상속(is-a a는 b의 한 종류다): 기존 객체를 확장하여 더 특수화된 객체를 만드는것
+    구성(has-a, a는 b를 가지고 있다): 각 객체를 독립적인 부품으로 만들고 그것들을 조립해서 더 큰 객체로 만들기
+
+    1.재사용성: 자연스럽게 코드중복이 줄어듬
+    2.낮은 결합도:
+    외부에서 봤을때 triangle과 square는 모두 같은 check_ray_collision을 사용하고 있기 때문에 내부를 알 필요가 없어서 의존성이 낮아진다.
+    또한 외부의존성이 없기 떄문에 수정이나 교체가 용이하다
+
+    3.명확한 역할과 책임:
+    triangle: 세 점으로 이루어진 삼각형과 광선의 충돌을 계산하는 책임
+    square: 두개의 triangle을 관리하고 충돌검사 요청이 오면 일을 위임하고 결과를 종합하는 책임
+    raytraccer: 화면의 모든 픽셀에 대해 광선을 쏘고 충돌검사를 요청해서 최종 색상을 결정하는 책임
+
+    독립적이고 완전한 기능: triangle, square의 check_ray_collision
+    표준화된 연결부: 같은 규격을 통해 연결될 수 있게 함 Object 트레잇은 objects벡터에 포함됨
+*/
+
+struct Square {
+    triangle1: Triangle,
+    triangle2: Triangle,
+}
+
+impl Object for Square {
+    fn check_ray_collision(&self, ray: &Ray) -> Hit {
+        // 두 삼각형에 대해 각각 충돌 검사
+        let hit1 = self.triangle1.check_ray_collision(ray);
+        let hit2 = self.triangle2.check_ray_collision(ray);
+
+        // 두 삼각형 모두와 충돌했다면, 더 가까운 쪽의 충돌 정보를 반환
+        if hit1.distance >= 0.0 && hit2.distance >= 0.0 {
+            if hit1.distance < hit2.distance {
+                hit1
+            } else {
+                hit2
+            }
+        }
+        // 한 쪽만 충돌했다면, 그 충돌 정보를 반환
+        else if hit1.distance >= 0.0 {
+            hit1
+        // hit2가 충돌했거나, 둘 다 충돌하지 않은 경우 (-1.0)
+        } else {
+            hit2
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    // Square의 재질은 첫 번째 삼각형의 재질을 대표로 사용
+    fn ambient(&self) -> Vec3 {
+        self.triangle1.ambient()
+    }
+    fn diffuse(&self) -> Vec3 {
+        self.triangle1.diffuse()
+    }
+    fn specular(&self) -> Vec3 {
+        self.triangle1.specular()
+    }
+    fn alpha(&self) -> f32 {
+        self.triangle1.alpha()
+    }
+}
+
 struct Light {
     pos: Vec3,
 }
@@ -222,36 +288,51 @@ struct Raytracer {
     height: i32,
     objects: Vec<Arc<dyn Object>>,
     light: Light,
+    sphere_center: Vec3, // UI에서 구 위치를 조작하기 위해 추가
 }
 
 impl Raytracer {
     fn new(width: i32, height: i32) -> Self {
+        let sphere_center = vec3(0.0, 0.0, 0.6);
         let sphere1 = Arc::new(Sphere {
-            center: vec3(0.6, 0.0, 0.5),
+            center: sphere_center,
             radius: 0.4,
-            amb: vec3(0.1, 0.1, 0.1),
+            amb: vec3(0.2, 0.0, 0.0),
             diff: vec3(1.0, 0.1, 0.1),
-            spec: vec3(1.0, 1.0, 1.0),
+            spec: vec3(1.5, 1.5, 1.5),
             alpha: 50.0,
         });
 
-        let triangle1 = Arc::new(Triangle {
-            v0: vec3(-2.0, -2.0, 2.0),
-            v1: vec3(-2.0, 2.0, 2.0),
-            v2: vec3(2.0, 2.0, 2.0),
-            amb: vec3(0.2, 0.2, 0.2),
-            diff: vec3(0.5, 0.5, 0.5),
-            spec: vec3(0.5, 0.5, 0.5),
-            alpha: 5.0,
+        // 사각형 바닥을 정의합니다.
+        let floor = Arc::new(Square {
+            triangle1: Triangle {
+                v0: vec3(-2.0, -1.0, 0.0),
+                v1: vec3(-2.0, -1.0, 4.0),
+                v2: vec3(2.0, -1.0, 4.0),
+                amb: vec3(0.2, 0.2, 0.2),
+                diff: vec3(0.8, 0.8, 0.8),
+                spec: vec3(1.0, 1.0, 1.0),
+                alpha: 50.0,
+            },
+            triangle2: Triangle {
+                v0: vec3(-2.0, -1.0, 0.0),
+                v1: vec3(2.0, -1.0, 4.0),
+                v2: vec3(2.0, -1.0, 0.0),
+                amb: vec3(0.2, 0.2, 0.2),
+                diff: vec3(0.8, 0.8, 0.8),
+                spec: vec3(1.0, 1.0, 1.0),
+                alpha: 50.0,
+            },
         });
 
         Self {
             width,
             height,
-            objects: vec![sphere1, triangle1],
+            objects: vec![sphere1, floor],
             light: Light {
-                pos: vec3(0.0, 1.0, -1.0),
+                pos: vec3(0.0, 1.0, 0.2),
             },
+            sphere_center,
         }
     }
 
@@ -287,32 +368,67 @@ impl Raytracer {
         )
     }
 
+    // 그림자 계산이 추가된 trace_ray 함수
     fn trace_ray(&self, ray: &Ray) -> Vec3 {
         let hit = self.find_closest_collision(ray);
 
         if let Some(obj) = hit.object {
+            // 1. 기본 색상(Ambient)으로 시작
+            let mut color = obj.ambient();
+
+            // 2. 그림자 광선(Shadow Ray)을 생성
+            //    - 시작점: 현재 충돌 지점(hit.point). 부동소수점 오차를 피하기 위해 빛 방향으로 살짝 이동시킵니다.
+            //    - 방향: 충돌 지점에서 광원을 향하는 방향.
             let dir_to_light =
                 (self.light.pos - hit.point).normalize();
-            let diff = hit.normal.dot(dir_to_light).max(0.0);
+            let shadow_ray = Ray {
+                origin: hit.point + dir_to_light * 1e-4,
+                direction: dir_to_light,
+            };
 
-            let reflect_dir =
-                2.0 * hit.normal.dot(dir_to_light) * hit.normal
-                    - dir_to_light;
-            let specular = (-ray.direction)
-                .dot(reflect_dir)
-                .max(0.0)
-                .powf(obj.alpha());
+            // 3. 그림자 광선으로 충돌 검사
+            //    find_closest_collision 결과의 distance가 음수이면, 광원까지 가는 길에 아무것도 없다는 의미입니다.
+            //    즉, 그림자가 지지 않은 상태입니다.
+            if self.find_closest_collision(&shadow_ray).distance < 0.0
+            {
+                // 4. 그림자가 지지 않았다면, Diffuse와 Specular 색상을 계산하여 더하기
+                let diff = hit.normal.dot(dir_to_light).max(0.0);
+                let reflect_dir =
+                    2.0 * hit.normal.dot(dir_to_light) * hit.normal
+                        - dir_to_light;
+                let specular = (-ray.direction)
+                    .dot(reflect_dir)
+                    .max(0.0)
+                    .powf(obj.alpha());
 
-            obj.ambient()
-                + obj.diffuse() * diff
-                + obj.specular() * specular
+                color +=
+                    obj.diffuse() * diff + obj.specular() * specular;
+            }
+
+            // 최종 계산된 색상을 반환함(그림자일때는 ambient(주변광)만 있음)
+            color
         } else {
+            // 광선이 아무 물체와도 부딪히지 않으면 검은색을 반환
             vec3(0.0, 0.0, 0.0)
         }
     }
 
-    fn render(&self, pixels: &mut [Color32]) {
+    fn render(&mut self, pixels: &mut [Color32]) {
         use rayon::prelude::*;
+
+        // UI에서 변경된 구의 위치를 실제 객체에 반영합니다.
+        // objects 벡터에서 Sphere를 찾아 업데이트합니다.
+        if let Some(sphere_arc) = self.objects.get_mut(0) {
+            if let Some(sphere) =
+                Arc::get_mut(sphere_arc).and_then(|obj| {
+                    (obj as &mut dyn Object)
+                        .as_any_mut()
+                        .downcast_mut::<Sphere>()
+                })
+            {
+                sphere.center = self.sphere_center;
+            }
+        }
 
         let eye_pos = vec3(0.0, 0.0, -1.5);
 
@@ -349,26 +465,21 @@ pub struct TemplateApp {
     light_x: f32,
     light_y: f32,
     light_z: f32,
-}
-
-mod consts {
-    use egui::Color32;
-    pub const MAX_RESOLUTION_X: i32 = 1280;
-    pub const MAX_RESOLUTION_Y: i32 = 720;
-    pub const DEFAULT_BACKGROUND_COLOR: Color32 =
-        Color32::from_gray(30);
+    sphere_x: f32,
+    sphere_y: f32,
+    sphere_z: f32,
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
-        let raytracer = Raytracer::new(
-            consts::MAX_RESOLUTION_X,
-            consts::MAX_RESOLUTION_Y,
-        );
+        let raytracer = Raytracer::new(1280, 720);
         Self {
             light_x: raytracer.light.pos.x,
             light_y: raytracer.light.pos.y,
             light_z: raytracer.light.pos.z,
+            sphere_x: raytracer.sphere_center.x,
+            sphere_y: raytracer.sphere_center.y,
+            sphere_z: raytracer.sphere_center.z,
             raytracer,
         }
     }
@@ -394,23 +505,35 @@ impl eframe::App for TemplateApp {
         ctx: &egui::Context,
         _frame: &mut eframe::Frame,
     ) {
-        self.raytracer.light.pos.x = self.light_x;
-        self.raytracer.light.pos.y = self.light_y;
-        self.raytracer.light.pos.z = self.light_z;
+        // UI 값들을 Raytracer 객체에 반영
+        self.raytracer.light.pos =
+            vec3(self.light_x, self.light_y, self.light_z);
+        self.raytracer.sphere_center =
+            vec3(self.sphere_x, self.sphere_y, self.sphere_z);
 
         egui::SidePanel::left("control_panel").show(ctx, |ui| {
-            ui.heading("Light Controls");
+            ui.heading("Controls");
+            ui.separator();
+            ui.label("Light Position");
             ui.add(
-                Slider::new(&mut self.light_x, -2.0..=2.0)
-                    .text("Light X"),
+                Slider::new(&mut self.light_x, -2.0..=2.0).text("X"),
             );
             ui.add(
-                Slider::new(&mut self.light_y, -2.0..=2.0)
-                    .text("Light Y"),
+                Slider::new(&mut self.light_y, -2.0..=2.0).text("Y"),
             );
             ui.add(
-                Slider::new(&mut self.light_z, -2.0..=2.0)
-                    .text("Light Z"),
+                Slider::new(&mut self.light_z, -2.0..=2.0).text("Z"),
+            );
+            ui.separator();
+            ui.label("Sphere Position");
+            ui.add(
+                Slider::new(&mut self.sphere_x, -1.0..=1.0).text("X"),
+            );
+            ui.add(
+                Slider::new(&mut self.sphere_y, -1.0..=1.0).text("Y"),
+            );
+            ui.add(
+                Slider::new(&mut self.sphere_z, -1.0..=1.0).text("Z"),
             );
         });
 
@@ -422,10 +545,8 @@ impl eframe::App for TemplateApp {
             let width = self.raytracer.width as usize;
             let height = self.raytracer.height as usize;
 
-            let mut pixels: Vec<Color32> = vec![
-                    consts::DEFAULT_BACKGROUND_COLOR;
-                    width * height
-                ];
+            let mut pixels: Vec<Color32> =
+                vec![Color32::BLACK; width * height];
 
             self.raytracer.render(&mut pixels);
 
