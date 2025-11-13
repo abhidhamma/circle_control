@@ -3,8 +3,8 @@ use glam::{Vec3, vec3};
 use std::any::Any;
 use std::sync::Arc;
 
-// Send + Sync는 여러 스레드에서 안전하게 공유 가능하도록 하는 제약 조건
-// Any 트레잇을 상속받아 다운캐스팅이 가능하도록 하기
+// Send + Sync는 여러 스레드에서 안전하게 공유 가능하게함
+// Any는 런타임에 타입정보를 제공해서 다운캐스팅이 가능하도록함
 trait Object: Send + Sync + Any {
     fn check_ray_collision(&self, ray: &Ray) -> Hit;
     fn ambient(&self) -> Vec3;
@@ -373,12 +373,12 @@ impl Raytracer {
         let hit = self.find_closest_collision(ray);
 
         if let Some(obj) = hit.object {
-            // 1. 기본 색상(Ambient)으로 시작
+            // 1. ambient(주변광)으로 시작
             let mut color = obj.ambient();
 
-            // 2. 그림자 광선(Shadow Ray)을 생성
-            //    - 시작점: 현재 충돌 지점(hit.point). 부동소수점 오차를 피하기 위해 빛 방향으로 살짝 이동시킵니다.
-            //    - 방향: 충돌 지점에서 광원을 향하는 방향.
+            // 2. 그림자를 확인하는 광선을 생성
+            // origin: 충돌 지점에서 부동소수점 오차만큼 빛방향으로 이동
+            // direction: 충돌 지점에서 광원을 향하는 방향.
             let dir_to_light =
                 (self.light.pos - hit.point).normalize();
             let shadow_ray = Ray {
@@ -387,11 +387,11 @@ impl Raytracer {
             };
 
             // 3. 그림자 광선으로 충돌 검사
-            //    find_closest_collision 결과의 distance가 음수이면, 광원까지 가는 길에 아무것도 없다는 의미입니다.
-            //    즉, 그림자가 지지 않은 상태입니다.
+            // find_closest_collision 결과의 distance가 음수이면
+            // 그림자가 지지 않은 상태
             if self.find_closest_collision(&shadow_ray).distance < 0.0
             {
-                // 4. 그림자가 지지 않았다면, Diffuse와 Specular 색상을 계산하여 더하기
+                // 4. 그림자가 지지 않았으면 diffuse와 specular 더하기
                 let diff = hit.normal.dot(dir_to_light).max(0.0);
                 let reflect_dir =
                     2.0 * hit.normal.dot(dir_to_light) * hit.normal
@@ -405,7 +405,8 @@ impl Raytracer {
                     obj.diffuse() * diff + obj.specular() * specular;
             }
 
-            // 최종 계산된 색상을 반환함(그림자일때는 ambient(주변광)만 있음)
+            // 최종 계산된 색상을 반환
+            // 그림자일때는 ambient(주변광)만 있음
             color
         } else {
             // 광선이 아무 물체와도 부딪히지 않으면 검은색을 반환
