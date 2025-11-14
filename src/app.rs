@@ -1,36 +1,42 @@
+use eframe::egui;
 use egui::{Color32, TextureOptions};
 use glam::{Vec2, Vec3, vec2, vec3};
+use image::GenericImageView;
 use std::any::Any;
 use std::sync::Arc;
 
-// C++의 Object 클래스 -> Rust의 Object 트레잇
-// Send + Sync는 여러 스레드에서 안전하게 공유 가능하게 함 (rayon 병렬 처리용)
-// Any는 런타임에 타입 정보를 제공해서 다운캐스팅이 가능하도록 함
+/*
+ * C++의 Object 클래스 -> Rust의 Object 트레잇
+ * Send + Sync: 여러 스레드에서 안전하게 공유 가능 (rayon 병렬 처리용)
+ * Any: 런타임에 타입 정보를 제공하여 다운캐스팅 가능
+ */
 trait Object: Send + Sync + Any {
     fn check_ray_collision(&self, ray: &Ray) -> Hit;
     fn ambient(&self) -> Vec3;
     fn diffuse(&self) -> Vec3;
     fn specular(&self) -> Vec3;
     fn alpha(&self) -> f32;
+    fn amb_texture(&self) -> Option<Arc<Texture>>;
+    fn diff_texture(&self) -> Option<Arc<Texture>>;
     fn as_any(&self) -> &dyn Any;
 }
 
-// C++의 Hit 구조체 -> Rust의 Hit 구조체
+// C++ Hit -> Rust Hit
 struct Hit {
     distance: f32,
     point: Vec3,
     normal: Vec3,
-    w: Vec2, // 무게중심 좌표(Barycentric coordinates)
+    uv: Vec2, // 텍스처 좌표
     object: Option<Arc<dyn Object>>,
 }
 
-// C++의 Ray 구조체 -> Rust의 Ray 구조체
+// C++ Ray -> Rust Ray
 struct Ray {
     origin: Vec3,
     direction: Vec3,
 }
 
-// C++의 Sphere 클래스 -> Rust의 Sphere 구조체
+// C++ Sphere -> Rust Sphere
 struct Sphere {
     center: Vec3,
     radius: f32,
@@ -40,7 +46,7 @@ struct Sphere {
     alpha: f32,
 }
 
-// Sphere에 대한 Object 트레잇 구현
+// Sphere의 Object 트레잇 구현
 impl Object for Sphere {
     fn check_ray_collision(&self, ray: &Ray) -> Hit {
         let oc = ray.origin - self.center;
@@ -53,7 +59,7 @@ impl Object for Sphere {
                 distance: -1.0,
                 point: Vec3::ZERO,
                 normal: Vec3::ZERO,
-                w: Vec2::ZERO,
+                uv: Vec2::ZERO,
                 object: None,
             };
         }
@@ -75,7 +81,7 @@ impl Object for Sphere {
                 distance: -1.0,
                 point: Vec3::ZERO,
                 normal: Vec3::ZERO,
-                w: Vec2::ZERO,
+                uv: Vec2::ZERO,
                 object: None,
             };
         }
@@ -86,7 +92,7 @@ impl Object for Sphere {
             distance,
             point,
             normal,
-            w: Vec2::ZERO, // 구는 무게중심 좌표가 필요 없음
+            uv: Vec2::ZERO, // 구는 텍스처 좌표 없음
             object: None,
         }
     }
@@ -106,62 +112,61 @@ impl Object for Sphere {
     fn alpha(&self) -> f32 {
         self.alpha
     }
+    fn amb_texture(&self) -> Option<Arc<Texture>> {
+        None
+    }
+    fn diff_texture(&self) -> Option<Arc<Texture>> {
+        None
+    }
 }
 
-// C++의 Triangle 클래스 -> Rust의 Triangle 구조체
+// C++ Triangle -> Rust Triangle
 struct Triangle {
     v0: Vec3,
     v1: Vec3,
     v2: Vec3,
+    uv0: Vec2,
+    uv1: Vec2,
+    uv2: Vec2,
     amb: Vec3,
     diff: Vec3,
     spec: Vec3,
     alpha: f32,
+    amb_texture: Option<Arc<Texture>>,
+    diff_texture: Option<Arc<Texture>>,
 }
 
 impl Triangle {
-    // 광선과 산각형의 교점을 찾는 함수
+    // 광선과 삼각형 교점 찾기
     fn intersect_ray_triangle(
         &self,
         ray: &Ray,
     ) -> Option<(f32, Vec3, Vec3, f32, f32)> {
-        // 광원과 삼각형 사이의 거리를 구하기 위해
-        // 삼각형 평면의 수직벡터 찾기
         let face_normal =
             (self.v1 - self.v0).cross(self.v2 - self.v0).normalize();
 
-        // back-face culling(뒷면제거): 두번그릴 필요 없으니까
-        // 광선이 삼각형의 뒷면에서 온다면 충돌하지 않은것으로 처리
         if (-ray.direction).dot(face_normal) < 0.0 {
             return None; // Backface culling
         }
 
-        // 광선과 평면이 거의 평행한 경우, 충돌하지 않음
-        // (0으로 나누면 에러나는것 방지)
         if ray.direction.dot(face_normal).abs() < 1e-2 {
             return None;
         }
 
-        // 1.광선과 삼각형이 있는 평면이 만나는 점과의 거리 t 찾기
         let t = (self.v0.dot(face_normal)
             - ray.origin.dot(face_normal))
             / ray.direction.dot(face_normal);
 
-        // 삼각형이 시점보다 뒤에 있다면 충돌하지 않도록 처리
         if t < 0.0 {
             return None;
         }
 
-        // 2.교점이 삼각형 내부에 있는지 확인(inside-outside test)
         let point = ray.origin + t * ray.direction;
 
-        // 각 변에서 교점으로 향하는 벡터를 계산
-        // 오른손법칙에 의해 삼각형 내부에 있다면 수직벡터는 0보다 큼
         let cross0 = (point - self.v2).cross(self.v1 - self.v2);
         let cross1 = (point - self.v0).cross(self.v2 - self.v0);
         let cross2 = (self.v1 - self.v0).cross(point - self.v0);
 
-        // 벡터가 face_normal과 같은 방향인지 확인
         if cross0.dot(face_normal) < 0.0
             || cross1.dot(face_normal) < 0.0
             || cross2.dot(face_normal) < 0.0
@@ -169,17 +174,6 @@ impl Triangle {
             return None;
         }
 
-        /*
-            무게중심 좌표(Barycentric Coordinates) 계산
-
-            외적(cross product)의 길이는 두 벡터가 이루는 평행사변형의 넓이와 같다
-            그러므로 0.5를 곱해주면 삼각형의 넓이가 된다.
-
-            큰삼각형에서 점 p로 나눠진 작은 삼각형 세개의 비율로
-            무게중심 w0, w1, w2를 알 수 있고
-            색상을 인터폴레이션 하고싶다면 w0, w1, w2를 가중치로 사용해서
-            점의 색깔 c를 결정할 수 있다
-        */
         let area0 = cross0.length() * 0.5;
         let area1 = cross1.length() * 0.5;
         let area2 = cross2.length() * 0.5;
@@ -187,9 +181,7 @@ impl Triangle {
 
         let w0 = area0 / area_sum;
         let w1 = area1 / area_sum;
-        // w2는 1 - w0 - w1로 계산가능
 
-        // 모든 테스트를 통과하면 교점은 삼각형 내부에 있음
         Some((t, point, face_normal, w0, w1))
     }
 }
@@ -199,11 +191,13 @@ impl Object for Triangle {
         if let Some((t, point, normal, w0, w1)) =
             self.intersect_ray_triangle(ray)
         {
+            let w2 = 1.0 - w0 - w1;
+            let uv = self.uv0 * w0 + self.uv1 * w1 + self.uv2 * w2;
             Hit {
                 distance: t,
                 point,
                 normal,
-                w: vec2(w0, w1),
+                uv,
                 object: None,
             }
         } else {
@@ -211,7 +205,7 @@ impl Object for Triangle {
                 distance: -1.0,
                 point: Vec3::ZERO,
                 normal: Vec3::ZERO,
-                w: Vec2::ZERO,
+                uv: Vec2::ZERO,
                 object: None,
             }
         }
@@ -232,24 +226,205 @@ impl Object for Triangle {
     fn alpha(&self) -> f32 {
         self.alpha
     }
+    fn amb_texture(&self) -> Option<Arc<Texture>> {
+        self.amb_texture.clone()
+    }
+    fn diff_texture(&self) -> Option<Arc<Texture>> {
+        self.diff_texture.clone()
+    }
 }
 
-// C++의 Light 클래스 -> Rust의 Light 구조체
+// C++ Square -> Rust Square
+struct Square {
+    triangle1: Triangle,
+    triangle2: Triangle,
+}
+
+impl Object for Square {
+    fn check_ray_collision(&self, ray: &Ray) -> Hit {
+        let hit1 = self.triangle1.check_ray_collision(ray);
+        let hit2 = self.triangle2.check_ray_collision(ray);
+
+        if hit1.distance >= 0.0 && hit2.distance >= 0.0 {
+            if hit1.distance < hit2.distance {
+                hit1
+            } else {
+                hit2
+            }
+        } else if hit1.distance >= 0.0 {
+            hit1
+        } else {
+            hit2
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn ambient(&self) -> Vec3 {
+        self.triangle1.ambient()
+    }
+    fn diffuse(&self) -> Vec3 {
+        self.triangle1.diffuse()
+    }
+    fn specular(&self) -> Vec3 {
+        self.triangle1.specular()
+    }
+    fn alpha(&self) -> f32 {
+        self.triangle1.alpha()
+    }
+    fn amb_texture(&self) -> Option<Arc<Texture>> {
+        self.triangle1.amb_texture()
+    }
+    fn diff_texture(&self) -> Option<Arc<Texture>> {
+        self.triangle1.diff_texture()
+    }
+}
+
+// C++ Light -> Rust Light
 struct Light {
     pos: Vec3,
 }
 
-// C++의 Raytracer 클래스 -> Rust의 Raytracer 구조체
+// C++ Texture -> Rust Texture
+struct Texture {
+    width: u32,
+    height: u32,
+    channels: u32,
+    image: Vec<u8>,
+}
+
+impl Texture {
+    // image-rs의 DynamicImage로부터 Texture를 생성하는 함수
+    fn from_dynamic_image(img: image::DynamicImage) -> Self {
+        let (width, height) = img.dimensions();
+        let image_data = img.to_rgba8().into_raw(); // RGBA8로 통일
+
+        Self {
+            width,
+            height,
+            channels: 4, // RGBA
+            image: image_data,
+        }
+    }
+
+    /*
+     * i, j 좌표 픽셀 색상 가져오기. 범위를 벗어나면 가장 가까운 색상으로 clamp.
+     * clamp함수는 최대값과 최소값을 제한.
+     * - 최대값보다 클때 -> 최대값 리턴
+     * - 최대값보다 작거나 같고 최소값보다 크거나 같을때 -> 현재값 리턴
+     * - 최소값보다 작을때 -> 최소값 리턴
+     */
+    fn get_clamped(&self, i: i32, j: i32) -> Vec3 {
+        let i = i.clamp(0, self.width as i32 - 1) as u32;
+        let j = j.clamp(0, self.height as i32 - 1) as u32;
+
+        let idx = ((j * self.width + i) * self.channels) as usize;
+        let r = self.image[idx] as f32 / 255.0;
+        let g = self.image[idx + 1] as f32 / 255.0;
+        let b = self.image[idx + 2] as f32 / 255.0;
+        vec3(r, g, b)
+    }
+
+    // i, j 좌표의 픽셀 색상을 가져옴. 범위를 벗어나면 반복(wrapping)시킴.
+    fn get_wrapped(&self, mut i: i32, mut j: i32) -> Vec3 {
+        i %= self.width as i32;
+        j %= self.height as i32;
+        if i < 0 {
+            i += self.width as i32;
+        }
+        if j < 0 {
+            j += self.height as i32;
+        }
+
+        let idx = ((j as u32 * self.width + i as u32) * self.channels)
+            as usize;
+        let r = self.image[idx] as f32 / 255.0;
+        let g = self.image[idx + 1] as f32 / 255.0;
+        let b = self.image[idx + 2] as f32 / 255.0;
+        vec3(r, g, b)
+    }
+
+    /// 두 개의 차원에서 수행되는 선형 보간 (Bilinear Interpolation)
+    fn interpolate_bilinear(
+        &self,
+        dx: f32,
+        dy: f32,
+        c00: Vec3,
+        c10: Vec3,
+        c01: Vec3,
+        c11: Vec3,
+    ) -> Vec3 {
+        let a = c00 * (1.0 - dx) + c10 * dx;
+        let b = c01 * (1.0 - dx) + c11 * dx;
+        a * (1.0 - dy) + b * dy
+    }
+
+    /// Point Sampling (Nearest-neighbor sampling)
+    /// 색을 해당 좌표에서 가장 가까운 픽셀의 색으로 결정.
+    fn sample_point(&self, uv: Vec2) -> Vec3 {
+        /*
+         * 1. 텍스처 좌표(uv): [0.0, 1.0] x [0.0, 1.0]
+         * 2. 이미지 좌표(xy): [-0.5, width - 0.5] x [-0.5, height - 0.5]
+         * 3. 배열 인덱스(ij): [0, width-1] x [0, height-1]
+         */
+
+        // 1 -> 2: uv 좌표계를 이미지 좌표계로 변환
+        // 이미지에서 좌표란 한 점이고 이 점은 이미지 픽셀의 가운데 저장되어있다고 가정.
+        // 따라서 좌표의 범위를 픽셀 크기만큼 상하좌우로 확장.
+        let xy = uv * vec2(self.width as f32, self.height as f32)
+            - vec2(0.5, 0.5);
+
+        // 2 -> 3: 가장 가까운 정수 인덱스 찾기
+        // round 연산 사용. 예: (0.3, 1) -> (0, 1), (0.7, 1) -> (1, 1)
+        let i = xy.x.round() as i32;
+        let j = xy.y.round() as i32;
+
+        self.get_clamped(i, j)
+    }
+
+    /// Linear Sampling (Bilinear filtering)
+    /// 색을 해당 좌표에서 가장 가까운 네 픽셀의 색을 거리에 따라 섞어서 결정.
+    fn sample_linear(&self, uv: Vec2) -> Vec3 {
+        // 1 -> 2: uv 좌표계를 이미지 좌표계로 변환
+        let xy = uv * vec2(self.width as f32, self.height as f32)
+            - vec2(0.5, 0.5);
+
+        // 2 -> 3: 현재 좌표가 속한 픽셀의 좌측 하단 정수 인덱스 찾기
+        // floor 함수 사용.
+        let i = xy.x.floor() as i32;
+        let j = xy.y.floor() as i32;
+
+        // 보간에 사용할 가중치 계산
+        let dx = xy.x - i as f32;
+        let dy = xy.y - j as f32;
+
+        // 주변 4개 픽셀 색상 가져오기
+        let c00 = self.get_clamped(i, j);
+        let c10 = self.get_clamped(i + 1, j);
+        let c01 = self.get_clamped(i, j + 1);
+        let c11 = self.get_clamped(i + 1, j + 1);
+
+        // 선형 보간을 세 번 수행하여 최종 색상 계산
+        self.interpolate_bilinear(dx, dy, c00, c10, c01, c11)
+    }
+}
+
+// C++ Raytracer -> Rust Raytracer
 struct Raytracer {
     width: i32,
     height: i32,
     objects: Vec<Arc<dyn Object>>,
-    temp_object_index: Option<usize>, // 색상 보간을 할 삼각형의 인덱스
     light: Light,
 }
 
 impl Raytracer {
-    fn new(width: i32, height: i32) -> Self {
+    // 생성자가 이제 텍스처를 직접 받음
+    fn new(
+        width: i32,
+        height: i32,
+        texture: Option<image::DynamicImage>,
+    ) -> Self {
         let sphere1 = Arc::new(Sphere {
             center: vec3(1.0, 0.0, 1.5),
             radius: 0.4,
@@ -259,22 +434,48 @@ impl Raytracer {
             alpha: 10.0,
         });
 
-        let triangle = Arc::new(Triangle {
-            v0: vec3(-2.0, -2.0, 2.0),
-            v1: vec3(-2.0, 2.0, 2.0),
-            v2: vec3(2.0, 2.0, 2.0),
-            amb: vec3(1.0, 1.0, 1.0),
-            diff: vec3(0.0, 0.0, 0.0),
-            spec: vec3(0.0, 0.0, 0.0),
-            alpha: 10.0,
-        });
+        // 텍스처가 로드되었을 때만 Square를 생성
+        let mut objects: Vec<Arc<dyn Object>> = vec![sphere1];
+        if let Some(img) = texture {
+            let image_texture =
+                Arc::new(Texture::from_dynamic_image(img));
 
-        let objects: Vec<Arc<dyn Object>> = vec![sphere1, triangle];
+            let square = Arc::new(Square {
+                triangle1: Triangle {
+                    v0: vec3(-2.0, 2.0, 2.0),
+                    v1: vec3(2.0, 2.0, 2.0),
+                    v2: vec3(2.0, -2.0, 2.0),
+                    uv0: vec2(0.0, 0.0),
+                    uv1: vec2(1.0, 0.0),
+                    uv2: vec2(1.0, 1.0),
+                    amb: vec3(0.0, 0.0, 0.0),
+                    diff: vec3(1.0, 1.0, 1.0),
+                    spec: vec3(0.0, 0.0, 0.0),
+                    alpha: 10.0,
+                    amb_texture: Some(image_texture.clone()),
+                    diff_texture: Some(image_texture.clone()),
+                },
+                triangle2: Triangle {
+                    v0: vec3(-2.0, 2.0, 2.0),
+                    v1: vec3(2.0, -2.0, 2.0),
+                    v2: vec3(-2.0, -2.0, 2.0),
+                    uv0: vec2(0.0, 0.0),
+                    uv1: vec2(1.0, 1.0),
+                    uv2: vec2(0.0, 1.0),
+                    amb: vec3(0.0, 0.0, 0.0),
+                    diff: vec3(1.0, 1.0, 1.0),
+                    spec: vec3(0.0, 0.0, 0.0),
+                    alpha: 10.0,
+                    amb_texture: Some(image_texture.clone()),
+                    diff_texture: Some(image_texture.clone()),
+                },
+            });
+            objects.push(square);
+        }
 
         Self {
             width,
             height,
-            temp_object_index: Some(1), // triangle이 1번 인덱스
             objects,
             light: Light {
                 pos: vec3(0.0, 1.0, 0.5),
@@ -288,7 +489,7 @@ impl Raytracer {
             distance: -1.0,
             point: Vec3::ZERO,
             normal: Vec3::ZERO,
-            w: Vec2::ZERO,
+            uv: Vec2::ZERO,
             object: None,
         };
 
@@ -307,33 +508,35 @@ impl Raytracer {
         let hit = self.find_closest_collision(ray);
 
         if let Some(obj) = hit.object {
-            let mut color = obj.ambient();
+            let mut color;
 
-            // C++ 코드의 tempObject 처리를 Rust 스타일로 변경
-            if self.temp_object_index.is_some()
-                && Arc::ptr_eq(
-                    &obj,
-                    &self.objects[self.temp_object_index.unwrap()],
-                )
-            {
-                let color0 = vec3(1.0, 0.0, 0.0);
-                let color1 = vec3(0.0, 1.0, 0.0);
-                let color2 = vec3(0.0, 0.0, 1.0);
-
-                let w0 = hit.w.x;
-                let w1 = hit.w.y;
-                let w2 = 1.0 - w0 - w1;
-
-                color = color0 * w0 + color1 * w1 + color2 * w2;
+            // Ambient
+            if let Some(tex) = obj.amb_texture() {
+                /*
+                 * 텍스처링: 모델 하나를 정교하게 만드는 대신에 이미지를 덧붙여서 아주 자세한 모델인것 처럼 렌더링.
+                 * 폴리곤들을 쓰는것보다 도형에 사진을 덧씌우는게 훨씬 빠름.
+                 */
+                // color = obj.ambient() * tex.sample_point(hit.uv); // Point Sampling
+                color = obj.ambient() * tex.sample_linear(hit.uv); // Linear Sampling
+            } else {
+                color = obj.ambient();
             }
 
             let dir_to_light =
                 (self.light.pos - hit.point).normalize();
+            let diff_intensity =
+                hit.normal.dot(dir_to_light).max(0.0);
 
-            // 그림자 효과는 일단 주석 처리 (C++ 코드와 동일하게)
-            // let shadow_ray = Ray { origin: hit.point + dir_to_light * 1e-4, direction: dir_to_light };
-            // if self.find_closest_collision(&shadow_ray).distance < 0.0 {
-            let diff = hit.normal.dot(dir_to_light).max(0.0);
+            // Diffuse
+            if let Some(tex) = obj.diff_texture() {
+                color += obj.diffuse()
+                    * diff_intensity
+                    * tex.sample_linear(hit.uv);
+            } else {
+                color += obj.diffuse() * diff_intensity;
+            }
+
+            // Specular
             let reflect_dir =
                 2.0 * hit.normal.dot(dir_to_light) * hit.normal
                     - dir_to_light;
@@ -341,9 +544,7 @@ impl Raytracer {
                 .dot(reflect_dir)
                 .max(0.0)
                 .powf(obj.alpha());
-
-            color += obj.diffuse() * diff + obj.specular() * specular;
-            // }
+            color += obj.specular() * specular;
 
             color
         } else {
@@ -398,13 +599,19 @@ pub struct TemplateApp {
     raytracer: Raytracer,
 
     #[serde(skip)]
-    is_first_frame: bool, // 첫 프레임에만 렌더링하기 위한 플래그
+    is_first_frame: bool,
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
+        // 컴파일 시점에 이미지 파일을 실행 파일에 포함시킴
+        let image_bytes = include_bytes!("../assets/rupi.jpg");
+        // 메모리 상의 바이트 데이터로부터 이미지를 로드
+        let image = image::load_from_memory(image_bytes).unwrap();
+
         Self {
-            raytracer: Raytracer::new(1280, 720), // 해상도 조절 가능
+            // 로드된 이미지로 Raytracer를 즉시 생성
+            raytracer: Raytracer::new(1280, 720, Some(image)),
             is_first_frame: true,
         }
     }
@@ -412,7 +619,6 @@ impl Default for TemplateApp {
 
 impl TemplateApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // 저장된 상태를 불러오거나 기본값으로 시작
         if let Some(storage) = cc.storage {
             return eframe::get_value(storage, eframe::APP_KEY)
                 .unwrap_or_default();
@@ -439,7 +645,6 @@ impl eframe::App for TemplateApp {
             let width = self.raytracer.width as usize;
             let height = self.raytracer.height as usize;
 
-            // C++ 코드의 count와 같이 첫 프레임에만 렌더링하도록 구현
             if self.is_first_frame {
                 let mut pixels: Vec<Color32> =
                     vec![Color32::BLACK; width * height];
@@ -450,7 +655,6 @@ impl eframe::App for TemplateApp {
                     bytemuck::cast_slice(&pixels),
                 );
 
-                // 렌더링된 이미지를 텍스처로 저장하여 재사용
                 ctx.memory_mut(|mem| {
                     mem.data.insert_temp(
                         egui::Id::new("raytrace_texture"),
@@ -461,7 +665,6 @@ impl eframe::App for TemplateApp {
                 self.is_first_frame = false;
             }
 
-            // 저장된 텍스처를 불러와서 매 프레임 그리기
             if let Some(texture) = ctx.memory(|mem| {
                 mem.data.get_temp::<egui::ColorImage>(egui::Id::new(
                     "raytrace_texture",
@@ -469,7 +672,7 @@ impl eframe::App for TemplateApp {
             }) {
                 let texture_handle = ctx.load_texture(
                     "raytrace_canvas",
-                    texture.clone(), // clone the image to create a texture
+                    texture.clone(),
                     TextureOptions::NEAREST,
                 );
                 ui.image((
@@ -478,8 +681,5 @@ impl eframe::App for TemplateApp {
                 ));
             }
         });
-
-        // UI 변경 시 다시 그리도록 요청 (지금은 UI가 없으므로 첫 프레임 이후 다시 그리지 않음)
-        // ctx.request_repaint();
     }
 }
