@@ -560,8 +560,8 @@ impl Raytracer {
             let pos_world = self
                 .transform_screen_to_world(vec2(i as f32, j as f32));
 
-            // --- 슈퍼샘플링 적용 여부 선택 ---
-            // 1. 픽셀당 광선 하나 (No Supersampling)
+            // 슈퍼샘플링 적용-
+            // 1. 픽셀당 광선 하나(슈퍼샘플링 적용X)
             let ray_dir = (pos_world - eye_pos).normalize();
             let pixel_ray = Ray {
                 origin: eye_pos,
@@ -569,7 +569,8 @@ impl Raytracer {
             };
             // let color_vec = self.trace_ray(&pixel_ray);
 
-            // 2. 2x2 슈퍼샘플링 (recursive_level = 1)
+            // 2. 2x2 슈퍼샘플링
+            // (픽셀중심좌표를 기준으로 픽셀을 네개로 분할해서 광선을 쏜 뒤 평균값으로 렌더링)
             let dx = 2.0 / self.height as f32;
             let color_vec =
                 self.trace_ray_2x2(eye_pos, pos_world, dx, 1);
@@ -596,7 +597,7 @@ pub struct TemplateApp {
 impl Default for TemplateApp {
     fn default() -> Self {
         Self {
-            raytracer: Raytracer::new(1280, 720),
+            raytracer: Raytracer::new(1280 / 2, 720 / 2),
             is_first_frame: true,
         }
     }
@@ -653,7 +654,12 @@ impl eframe::App for TemplateApp {
                     TextureOptions::NEAREST,
                 );
                 /* 이미지를 UI에 맞게 크기를 조절하여 표시 */
-                ui.image((texture_handle.id(), available_size));
+               let image = egui::Image::new(&texture_handle)
+                    .fit_to_original_size(1.0) // 원본 종횡비 유지
+                    .shrink_to_fit(); // UI 공간에 맞게 축소
+                ui.centered_and_justified(|ui| {
+                    ui.add(image);
+                });
             }
         });
     }
