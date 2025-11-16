@@ -2,14 +2,15 @@ use eframe::egui;
 use egui::{Color32, TextureOptions};
 use glam::{Vec2, Vec3, vec2, vec3};
 use image::GenericImageView;
+use rayon::prelude::*;
 use std::any::Any;
 use std::sync::Arc;
 
 /*
- * C++의 Object 클래스 -> Rust의 Object 트레잇
+ * Object 트레잇: 씬(Scene)에 포함될 수 있는 모든 객체의 공통 인터페이스
  * Send + Sync: 여러 스레드에서 안전하게 공유 가능 (rayon 병렬 처리용)
  * Any: 런타임에 타입 정보를 제공하여 다운캐스팅 가능
- */
+*/
 trait Object: Send + Sync + Any {
     fn check_ray_collision(&self, ray: &Ray) -> Hit;
     fn ambient(&self) -> Vec3;
@@ -21,7 +22,7 @@ trait Object: Send + Sync + Any {
     fn as_any(&self) -> &dyn Any;
 }
 
-// C++ Hit -> Rust Hit
+// 광선 충돌 정보를 담는 구조체
 struct Hit {
     distance: f32,
     point: Vec3,
@@ -30,13 +31,13 @@ struct Hit {
     object: Option<Arc<dyn Object>>,
 }
 
-// C++ Ray -> Rust Ray
+// 광선을 나타내는 구조체
 struct Ray {
     origin: Vec3,
     direction: Vec3,
 }
 
-// C++ Sphere -> Rust Sphere
+// 구(Sphere)를 나타내는 구조체
 struct Sphere {
     center: Vec3,
     radius: f32,
@@ -46,13 +47,14 @@ struct Sphere {
     alpha: f32,
 }
 
-// Sphere의 Object 트레잇 구현
+// Sphere에 대한 Object 트레잇 구현
 impl Object for Sphere {
     fn check_ray_collision(&self, ray: &Ray) -> Hit {
         let oc = ray.origin - self.center;
+        let a = ray.direction.length_squared();
         let b = 2.0 * ray.direction.dot(oc);
         let c = oc.length_squared() - self.radius * self.radius;
-        let discriminant = b * b - 4.0 * c;
+        let discriminant = b * b - 4.0 * a * c;
 
         if discriminant < 0.0 {
             return Hit {
@@ -65,10 +67,10 @@ impl Object for Sphere {
         }
 
         let sqrt_discriminant = discriminant.sqrt();
-        let t1 = (-b - sqrt_discriminant) / 2.0;
-        let t2 = (-b + sqrt_discriminant) / 2.0;
+        let t1 = (-b - sqrt_discriminant) / (2.0 * a);
+        let t2 = (-b + sqrt_discriminant) / (2.0 * a);
 
-        let distance = if t1 >= 0.0 && (t1 < t2 || t2 < 0.0) {
+        let distance = if t1 >= 0.0 {
             t1
         } else if t2 >= 0.0 {
             t2
@@ -120,7 +122,7 @@ impl Object for Sphere {
     }
 }
 
-// C++ Triangle -> Rust Triangle
+// 삼각형(Triangle)을 나타내는 구조체
 struct Triangle {
     v0: Vec3,
     v1: Vec3,
@@ -145,14 +147,17 @@ impl Triangle {
         let face_normal =
             (self.v1 - self.v0).cross(self.v2 - self.v0).normalize();
 
+        // Backface culling: 삼각형 뒷면은 그리지 않음
         if (-ray.direction).dot(face_normal) < 0.0 {
-            return None; // Backface culling
+            return None;
         }
 
+        // 평면과 광선이 거의 평행하면 충돌하지 않음
         if ray.direction.dot(face_normal).abs() < 1e-2 {
             return None;
         }
 
+        // 광선과 평면의 교점 계산
         let t = (self.v0.dot(face_normal)
             - ray.origin.dot(face_normal))
             / ray.direction.dot(face_normal);
@@ -163,6 +168,7 @@ impl Triangle {
 
         let point = ray.origin + t * ray.direction;
 
+        // 교점이 삼각형 내부에 있는지 확인
         let cross0 = (point - self.v2).cross(self.v1 - self.v2);
         let cross1 = (point - self.v0).cross(self.v2 - self.v0);
         let cross2 = (self.v1 - self.v0).cross(point - self.v0);
@@ -174,10 +180,13 @@ impl Triangle {
             return None;
         }
 
+        // 무게중심 좌표(Barycentric coordinates) 계산
         let area0 = cross0.length() * 0.5;
         let area1 = cross1.length() * 0.5;
-        let area2 = cross2.length() * 0.5;
-        let area_sum = area0 + area1 + area2;
+        let _area2 = cross2.length() * 0.5;
+        let area_sum =
+            (self.v1 - self.v0).cross(self.v2 - self.v0).length()
+                * 0.5;
 
         let w0 = area0 / area_sum;
         let w1 = area1 / area_sum;
@@ -234,7 +243,7 @@ impl Object for Triangle {
     }
 }
 
-// C++ Square -> Rust Square
+// 사각형(Square)을 나타내는 구조체
 struct Square {
     triangle1: Triangle,
     triangle2: Triangle,
@@ -281,12 +290,12 @@ impl Object for Square {
     }
 }
 
-// C++ Light -> Rust Light
+// 점 광원(Point Light)을 나타내는 구조체
 struct Light {
     pos: Vec3,
 }
 
-// C++ Texture -> Rust Texture
+// 텍스처 데이터를 담는 구조체
 struct Texture {
     width: u32,
     height: u32,
@@ -295,38 +304,18 @@ struct Texture {
 }
 
 impl Texture {
-    // image-rs의 DynamicImage로부터 Texture를 생성하는 함수
     fn from_dynamic_image(img: image::DynamicImage) -> Self {
         let (width, height) = img.dimensions();
-        let image_data = img.to_rgba8().into_raw(); // RGBA8로 통일
+        let image_data = img.to_rgba8().into_raw();
 
         Self {
             width,
             height,
-            channels: 4, // RGBA
+            channels: 4,
             image: image_data,
         }
     }
 
-    /*
-     * i, j 좌표 픽셀 색상 가져오기. 범위를 벗어나면 가장 가까운 색상으로 clamp.
-     * clamp함수는 최대값과 최소값을 제한.
-     * - 최대값보다 클때 -> 최대값 리턴
-     * - 최대값보다 작거나 같고 최소값보다 크거나 같을때 -> 현재값 리턴
-     * - 최소값보다 작을때 -> 최소값 리턴
-     */
-    fn get_clamped(&self, i: i32, j: i32) -> Vec3 {
-        let i = i.clamp(0, self.width as i32 - 1) as u32;
-        let j = j.clamp(0, self.height as i32 - 1) as u32;
-
-        let idx = ((j * self.width + i) * self.channels) as usize;
-        let r = self.image[idx] as f32 / 255.0;
-        let g = self.image[idx + 1] as f32 / 255.0;
-        let b = self.image[idx + 2] as f32 / 255.0;
-        vec3(r, g, b)
-    }
-
-    // i, j 좌표의 픽셀 색상을 가져옴. 범위를 벗어나면 반복(wrapping)시킴.
     fn get_wrapped(&self, mut i: i32, mut j: i32) -> Vec3 {
         i %= self.width as i32;
         j %= self.height as i32;
@@ -345,7 +334,6 @@ impl Texture {
         vec3(r, g, b)
     }
 
-    /// 두 개의 차원에서 수행되는 선형 보간 (Bilinear Interpolation)
     fn interpolate_bilinear(
         &self,
         dx: f32,
@@ -355,62 +343,37 @@ impl Texture {
         c01: Vec3,
         c11: Vec3,
     ) -> Vec3 {
-        let a = c00 * (1.0 - dx) + c10 * dx;
-        let b = c01 * (1.0 - dx) + c11 * dx;
-        a * (1.0 - dy) + b * dy
+        let a = c00.lerp(c10, dx);
+        let b = c01.lerp(c11, dx);
+        a.lerp(b, dy)
     }
 
-    /// Point Sampling (Nearest-neighbor sampling)
-    /// 색을 해당 좌표에서 가장 가까운 픽셀의 색으로 결정.
     fn sample_point(&self, uv: Vec2) -> Vec3 {
-        /*
-         * 1. 텍스처 좌표(uv): [0.0, 1.0] x [0.0, 1.0]
-         * 2. 이미지 좌표(xy): [-0.5, width - 0.5] x [-0.5, height - 0.5]
-         * 3. 배열 인덱스(ij): [0, width-1] x [0, height-1]
-         */
-
-        // 1 -> 2: uv 좌표계를 이미지 좌표계로 변환
-        // 이미지에서 좌표란 한 점이고 이 점은 이미지 픽셀의 가운데 저장되어있다고 가정.
-        // 따라서 좌표의 범위를 픽셀 크기만큼 상하좌우로 확장.
         let xy = uv * vec2(self.width as f32, self.height as f32)
             - vec2(0.5, 0.5);
-
-        // 2 -> 3: 가장 가까운 정수 인덱스 찾기
-        // round 연산 사용. 예: (0.3, 1) -> (0, 1), (0.7, 1) -> (1, 1)
         let i = xy.x.round() as i32;
         let j = xy.y.round() as i32;
-
-        self.get_clamped(i, j)
+        self.get_wrapped(i, j)
     }
 
-    /// Linear Sampling (Bilinear filtering)
-    /// 색을 해당 좌표에서 가장 가까운 네 픽셀의 색을 거리에 따라 섞어서 결정.
     fn sample_linear(&self, uv: Vec2) -> Vec3 {
-        // 1 -> 2: uv 좌표계를 이미지 좌표계로 변환
         let xy = uv * vec2(self.width as f32, self.height as f32)
             - vec2(0.5, 0.5);
-
-        // 2 -> 3: 현재 좌표가 속한 픽셀의 좌측 하단 정수 인덱스 찾기
-        // floor 함수 사용.
         let i = xy.x.floor() as i32;
         let j = xy.y.floor() as i32;
-
-        // 보간에 사용할 가중치 계산
         let dx = xy.x - i as f32;
         let dy = xy.y - j as f32;
 
-        // 주변 4개 픽셀 색상 가져오기
-        let c00 = self.get_clamped(i, j);
-        let c10 = self.get_clamped(i + 1, j);
-        let c01 = self.get_clamped(i, j + 1);
-        let c11 = self.get_clamped(i + 1, j + 1);
+        let c00 = self.get_wrapped(i, j);
+        let c10 = self.get_wrapped(i + 1, j);
+        let c01 = self.get_wrapped(i, j + 1);
+        let c11 = self.get_wrapped(i + 1, j + 1);
 
-        // 선형 보간을 세 번 수행하여 최종 색상 계산
         self.interpolate_bilinear(dx, dy, c00, c10, c01, c11)
     }
 }
 
-// C++ Raytracer -> Rust Raytracer
+// 레이 트레이서
 struct Raytracer {
     width: i32,
     height: i32,
@@ -419,59 +382,48 @@ struct Raytracer {
 }
 
 impl Raytracer {
-    // 생성자가 이제 텍스처를 직접 받음
-    fn new(
-        width: i32,
-        height: i32,
-        texture: Option<image::DynamicImage>,
-    ) -> Self {
+    fn new(width: i32, height: i32) -> Self {
         let sphere1 = Arc::new(Sphere {
             center: vec3(1.0, 0.0, 1.5),
-            radius: 0.4,
+            radius: 0.8,
             amb: vec3(0.2, 0.2, 0.2),
             diff: vec3(1.0, 0.2, 0.2),
             spec: vec3(0.5, 0.5, 0.5),
             alpha: 10.0,
         });
 
-        // 텍스처가 로드되었을 때만 Square를 생성
-        let mut objects: Vec<Arc<dyn Object>> = vec![sphere1];
-        if let Some(img) = texture {
-            let image_texture =
-                Arc::new(Texture::from_dynamic_image(img));
+        let square = Arc::new(Square {
+            triangle1: Triangle {
+                v0: vec3(-2.0, 2.0, 2.0),
+                v1: vec3(2.0, 2.0, 2.0),
+                v2: vec3(2.0, -2.0, 2.0),
+                uv0: vec2(0.0, 0.0),
+                uv1: vec2(1.0, 0.0),
+                uv2: vec2(1.0, 1.0),
+                amb: vec3(0.2, 0.2, 0.2),
+                diff: vec3(1.0, 1.0, 1.0),
+                spec: vec3(0.0, 0.0, 0.0),
+                alpha: 10.0,
+                amb_texture: None,
+                diff_texture: None,
+            },
+            triangle2: Triangle {
+                v0: vec3(-2.0, 2.0, 2.0),
+                v1: vec3(2.0, -2.0, 2.0),
+                v2: vec3(-2.0, -2.0, 2.0),
+                uv0: vec2(0.0, 0.0),
+                uv1: vec2(1.0, 1.0),
+                uv2: vec2(0.0, 1.0),
+                amb: vec3(0.2, 0.2, 0.2),
+                diff: vec3(1.0, 1.0, 1.0),
+                spec: vec3(0.0, 0.0, 0.0),
+                alpha: 10.0,
+                amb_texture: None,
+                diff_texture: None,
+            },
+        });
 
-            let square = Arc::new(Square {
-                triangle1: Triangle {
-                    v0: vec3(-2.0, 2.0, 2.0),
-                    v1: vec3(2.0, 2.0, 2.0),
-                    v2: vec3(2.0, -2.0, 2.0),
-                    uv0: vec2(0.0, 0.0),
-                    uv1: vec2(1.0, 0.0),
-                    uv2: vec2(1.0, 1.0),
-                    amb: vec3(0.0, 0.0, 0.0),
-                    diff: vec3(1.0, 1.0, 1.0),
-                    spec: vec3(0.0, 0.0, 0.0),
-                    alpha: 10.0,
-                    amb_texture: Some(image_texture.clone()),
-                    diff_texture: Some(image_texture.clone()),
-                },
-                triangle2: Triangle {
-                    v0: vec3(-2.0, 2.0, 2.0),
-                    v1: vec3(2.0, -2.0, 2.0),
-                    v2: vec3(-2.0, -2.0, 2.0),
-                    uv0: vec2(0.0, 0.0),
-                    uv1: vec2(1.0, 1.0),
-                    uv2: vec2(0.0, 1.0),
-                    amb: vec3(0.0, 0.0, 0.0),
-                    diff: vec3(1.0, 1.0, 1.0),
-                    spec: vec3(0.0, 0.0, 0.0),
-                    alpha: 10.0,
-                    amb_texture: Some(image_texture.clone()),
-                    diff_texture: Some(image_texture.clone()),
-                },
-            });
-            objects.push(square);
-        }
+        let objects: Vec<Arc<dyn Object>> = vec![sphere1, square];
 
         Self {
             width,
@@ -512,12 +464,7 @@ impl Raytracer {
 
             // Ambient
             if let Some(tex) = obj.amb_texture() {
-                /*
-                 * 텍스처링: 모델 하나를 정교하게 만드는 대신에 이미지를 덧붙여서 아주 자세한 모델인것 처럼 렌더링.
-                 * 폴리곤들을 쓰는것보다 도형에 사진을 덧씌우는게 훨씬 빠름.
-                 */
-                // color = obj.ambient() * tex.sample_point(hit.uv); // Point Sampling
-                color = obj.ambient() * tex.sample_linear(hit.uv); // Linear Sampling
+                color = obj.ambient() * tex.sample_linear(hit.uv);
             } else {
                 color = obj.ambient();
             }
@@ -552,6 +499,45 @@ impl Raytracer {
         }
     }
 
+    // 슈퍼샘플링을 위한 재귀 함수
+    fn trace_ray_2x2(
+        &self,
+        eye_pos: Vec3,
+        pixel_pos: Vec3,
+        dx: f32,
+        recursive_level: i32,
+    ) -> Vec3 {
+        if recursive_level == 0 {
+            let ray = Ray {
+                origin: pixel_pos,
+                direction: (pixel_pos - eye_pos).normalize(),
+            };
+            return self.trace_ray(&ray);
+        }
+
+        let sub_dx = 0.5 * dx;
+        let mut pixel_color = Vec3::ZERO;
+
+        // 현재 픽셀을 2x2 서브픽셀로 나누어 각각 광선을 쏨
+        for j in 0..2 {
+            for i in 0..2 {
+                let sub_pos = vec3(
+                    pixel_pos.x + (i as f32 - 0.5) * sub_dx,
+                    pixel_pos.y + (j as f32 - 0.5) * sub_dx,
+                    pixel_pos.z,
+                );
+                pixel_color += self.trace_ray_2x2(
+                    eye_pos,
+                    sub_pos,
+                    sub_dx,
+                    recursive_level - 1,
+                );
+            }
+        }
+
+        pixel_color * 0.25 // 4개 서브픽셀 색상의 평균
+    }
+
     fn transform_screen_to_world(&self, pos_screen: Vec2) -> Vec3 {
         let x_scale = 2.0 / self.width as f32;
         let y_scale = 2.0 / self.height as f32;
@@ -565,8 +551,6 @@ impl Raytracer {
     }
 
     fn render(&mut self, pixels: &mut [Color32]) {
-        use rayon::prelude::*;
-
         let eye_pos = vec3(0.0, 0.0, -1.5);
 
         pixels.par_iter_mut().enumerate().for_each(|(idx, pixel)| {
@@ -575,13 +559,20 @@ impl Raytracer {
 
             let pos_world = self
                 .transform_screen_to_world(vec2(i as f32, j as f32));
+
+            // --- 슈퍼샘플링 적용 여부 선택 ---
+            // 1. 픽셀당 광선 하나 (No Supersampling)
             let ray_dir = (pos_world - eye_pos).normalize();
             let pixel_ray = Ray {
                 origin: eye_pos,
                 direction: ray_dir,
             };
+            // let color_vec = self.trace_ray(&pixel_ray);
 
-            let color_vec = self.trace_ray(&pixel_ray);
+            // 2. 2x2 슈퍼샘플링 (recursive_level = 1)
+            let dx = 2.0 / self.height as f32;
+            let color_vec =
+                self.trace_ray_2x2(eye_pos, pos_world, dx, 1);
 
             *pixel = Color32::from_rgb(
                 (color_vec.x.clamp(0.0, 1.0) * 255.0) as u8,
@@ -604,33 +595,21 @@ pub struct TemplateApp {
 
 impl Default for TemplateApp {
     fn default() -> Self {
-        // 컴파일 시점에 이미지 파일을 실행 파일에 포함시킴
-        let image_bytes = include_bytes!("../assets/rupi.jpg");
-        // 메모리 상의 바이트 데이터로부터 이미지를 로드
-        let image = image::load_from_memory(image_bytes).unwrap();
-
         Self {
-            // 로드된 이미지로 Raytracer를 즉시 생성
-            raytracer: Raytracer::new(1280, 720, Some(image)),
+            raytracer: Raytracer::new(1280, 720),
             is_first_frame: true,
         }
     }
 }
 
 impl TemplateApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        if let Some(storage) = cc.storage {
-            return eframe::get_value(storage, eframe::APP_KEY)
-                .unwrap_or_default();
-        }
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Default::default()
     }
 }
 
 impl eframe::App for TemplateApp {
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, self);
-    }
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {}
 
     fn update(
         &mut self,
@@ -639,15 +618,16 @@ impl eframe::App for TemplateApp {
     ) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let available_size = ui.available_size();
-            self.raytracer.width = available_size.x as i32;
-            self.raytracer.height = available_size.y as i32;
+            /* 렌더링 해상도를 창 크기에 맞추지 않고, 생성자에서 설정한 값으로 고정함 */
+            /* self.raytracer.width = available_size.x as i32; */
+            /* self.raytracer.height = available_size.y as i32; */
 
             let width = self.raytracer.width as usize;
             let height = self.raytracer.height as usize;
 
+            /* 첫 프레임에만 렌더링을 수행하여 결과를 텍스처에 저장함 */
             if self.is_first_frame {
-                let mut pixels: Vec<Color32> =
-                    vec![Color32::BLACK; width * height];
+                let mut pixels: Vec<Color32> = vec![Color32::BLACK; width * height];
                 self.raytracer.render(&mut pixels);
 
                 let image = egui::ColorImage::from_rgba_unmultiplied(
@@ -655,30 +635,25 @@ impl eframe::App for TemplateApp {
                     bytemuck::cast_slice(&pixels),
                 );
 
+                /* 렌더링된 이미지를 egui 컨텍스트 메모리에 저장 */
                 ctx.memory_mut(|mem| {
-                    mem.data.insert_temp(
-                        egui::Id::new("raytrace_texture"),
-                        image,
-                    )
+                    mem.data.insert_temp(egui::Id::new("raytrace_texture"), image)
                 });
 
                 self.is_first_frame = false;
             }
 
-            if let Some(texture) = ctx.memory(|mem| {
-                mem.data.get_temp::<egui::ColorImage>(egui::Id::new(
-                    "raytrace_texture",
-                ))
-            }) {
+            /* 매 프레임 저장된 이미지를 불러와 화면에 그림 */
+            if let Some(texture) =
+                ctx.memory(|mem| mem.data.get_temp::<egui::ColorImage>(egui::Id::new("raytrace_texture")))
+            {
                 let texture_handle = ctx.load_texture(
                     "raytrace_canvas",
                     texture.clone(),
                     TextureOptions::NEAREST,
                 );
-                ui.image((
-                    texture_handle.id(),
-                    texture_handle.size_vec2(),
-                ));
+                /* 이미지를 UI에 맞게 크기를 조절하여 표시 */
+                ui.image((texture_handle.id(), available_size));
             }
         });
     }
