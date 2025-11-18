@@ -3,23 +3,22 @@ use egui::{Color32, TextureOptions};
 use glam::{Vec2, Vec3, vec2, vec3};
 use image::GenericImageView;
 use rayon::prelude::*;
-use std::any::Any;
 use std::sync::Arc;
 
 /*
  * Object 트레잇: 씬(Scene)에 포함될 수 있는 모든 객체의 공통 인터페이스
  * Send + Sync: 여러 스레드에서 안전하게 공유 가능 (rayon 병렬 처리용)
- * Any: 런타임에 타입 정보를 제공하여 다운캐스팅 가능
 */
-trait Object: Send + Sync + Any {
+trait Object: Send + Sync {
     fn check_ray_collision(&self, ray: &Ray) -> Hit;
     fn ambient(&self) -> Vec3;
     fn diffuse(&self) -> Vec3;
     fn specular(&self) -> Vec3;
     fn alpha(&self) -> f32;
+    fn reflection(&self) -> f32;
+    fn transparency(&self) -> f32;
     fn amb_texture(&self) -> Option<Arc<Texture>>;
     fn diff_texture(&self) -> Option<Arc<Texture>>;
-    fn as_any(&self) -> &dyn Any;
 }
 
 // 광선 충돌 정보를 담는 구조체
@@ -45,6 +44,8 @@ struct Sphere {
     diff: Vec3,
     spec: Vec3,
     alpha: f32,
+    reflection: f32,
+    transparency: f32,
 }
 
 // Sphere에 대한 Object 트레잇 구현
@@ -99,9 +100,6 @@ impl Object for Sphere {
         }
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn ambient(&self) -> Vec3 {
         self.amb
     }
@@ -113,6 +111,12 @@ impl Object for Sphere {
     }
     fn alpha(&self) -> f32 {
         self.alpha
+    }
+    fn reflection(&self) -> f32 {
+        self.reflection
+    }
+    fn transparency(&self) -> f32 {
+        self.transparency
     }
     fn amb_texture(&self) -> Option<Arc<Texture>> {
         None
@@ -130,12 +134,6 @@ struct Triangle {
     uv0: Vec2,
     uv1: Vec2,
     uv2: Vec2,
-    amb: Vec3,
-    diff: Vec3,
-    spec: Vec3,
-    alpha: f32,
-    amb_texture: Option<Arc<Texture>>,
-    diff_texture: Option<Arc<Texture>>,
 }
 
 impl Triangle {
@@ -183,7 +181,6 @@ impl Triangle {
         // 무게중심 좌표(Barycentric coordinates) 계산
         let area0 = cross0.length() * 0.5;
         let area1 = cross1.length() * 0.5;
-        let _area2 = cross2.length() * 0.5;
         let area_sum =
             (self.v1 - self.v0).cross(self.v2 - self.v0).length()
                 * 0.5;
@@ -195,34 +192,93 @@ impl Triangle {
     }
 }
 
-impl Object for Triangle {
+// 사각형(Square)을 나타내는 구조체
+struct Square {
+    triangle1: Triangle,
+    triangle2: Triangle,
+    amb: Vec3,
+    diff: Vec3,
+    spec: Vec3,
+    alpha: f32,
+    reflection: f32,
+    transparency: f32,
+    amb_texture: Option<Arc<Texture>>,
+    diff_texture: Option<Arc<Texture>>,
+}
+
+impl Object for Square {
     fn check_ray_collision(&self, ray: &Ray) -> Hit {
-        if let Some((t, point, normal, w0, w1)) =
-            self.intersect_ray_triangle(ray)
-        {
-            let w2 = 1.0 - w0 - w1;
-            let uv = self.uv0 * w0 + self.uv1 * w1 + self.uv2 * w2;
-            Hit {
-                distance: t,
-                point,
-                normal,
-                uv,
-                object: None,
+        let hit1 = self.triangle1.intersect_ray_triangle(ray);
+        let hit2 = self.triangle2.intersect_ray_triangle(ray);
+
+        match (hit1, hit2) {
+            (Some(h1), Some(h2)) => {
+                if h1.0 < h2.0 {
+                    let (t, point, normal, w0, w1) = h1;
+                    let w2 = 1.0 - w0 - w1;
+                    let uv = self.triangle1.uv0 * w0
+                        + self.triangle1.uv1 * w1
+                        + self.triangle1.uv2 * w2;
+                    Hit {
+                        distance: t,
+                        point,
+                        normal,
+                        uv,
+                        object: None,
+                    }
+                } else {
+                    let (t, point, normal, w0, w1) = h2;
+                    let w2 = 1.0 - w0 - w1;
+                    let uv = self.triangle2.uv0 * w0
+                        + self.triangle2.uv1 * w1
+                        + self.triangle2.uv2 * w2;
+                    Hit {
+                        distance: t,
+                        point,
+                        normal,
+                        uv,
+                        object: None,
+                    }
+                }
             }
-        } else {
-            Hit {
+            (Some(h1), None) => {
+                let (t, point, normal, w0, w1) = h1;
+                let w2 = 1.0 - w0 - w1;
+                let uv = self.triangle1.uv0 * w0
+                    + self.triangle1.uv1 * w1
+                    + self.triangle1.uv2 * w2;
+                Hit {
+                    distance: t,
+                    point,
+                    normal,
+                    uv,
+                    object: None,
+                }
+            }
+            (None, Some(h2)) => {
+                let (t, point, normal, w0, w1) = h2;
+                let w2 = 1.0 - w0 - w1;
+                let uv = self.triangle2.uv0 * w0
+                    + self.triangle2.uv1 * w1
+                    + self.triangle2.uv2 * w2;
+                Hit {
+                    distance: t,
+                    point,
+                    normal,
+                    uv,
+                    object: None,
+                }
+            }
+            (None, None) => Hit {
                 distance: -1.0,
                 point: Vec3::ZERO,
                 normal: Vec3::ZERO,
                 uv: Vec2::ZERO,
                 object: None,
-            }
+            },
         }
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn ambient(&self) -> Vec3 {
         self.amb
     }
@@ -235,58 +291,17 @@ impl Object for Triangle {
     fn alpha(&self) -> f32 {
         self.alpha
     }
+    fn reflection(&self) -> f32 {
+        self.reflection
+    }
+    fn transparency(&self) -> f32 {
+        self.transparency
+    }
     fn amb_texture(&self) -> Option<Arc<Texture>> {
         self.amb_texture.clone()
     }
     fn diff_texture(&self) -> Option<Arc<Texture>> {
         self.diff_texture.clone()
-    }
-}
-
-// 사각형(Square)을 나타내는 구조체
-struct Square {
-    triangle1: Triangle,
-    triangle2: Triangle,
-}
-
-impl Object for Square {
-    fn check_ray_collision(&self, ray: &Ray) -> Hit {
-        let hit1 = self.triangle1.check_ray_collision(ray);
-        let hit2 = self.triangle2.check_ray_collision(ray);
-
-        if hit1.distance >= 0.0 && hit2.distance >= 0.0 {
-            if hit1.distance < hit2.distance {
-                hit1
-            } else {
-                hit2
-            }
-        } else if hit1.distance >= 0.0 {
-            hit1
-        } else {
-            hit2
-        }
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn ambient(&self) -> Vec3 {
-        self.triangle1.ambient()
-    }
-    fn diffuse(&self) -> Vec3 {
-        self.triangle1.diffuse()
-    }
-    fn specular(&self) -> Vec3 {
-        self.triangle1.specular()
-    }
-    fn alpha(&self) -> f32 {
-        self.triangle1.alpha()
-    }
-    fn amb_texture(&self) -> Option<Arc<Texture>> {
-        self.triangle1.amb_texture()
-    }
-    fn diff_texture(&self) -> Option<Arc<Texture>> {
-        self.triangle1.diff_texture()
     }
 }
 
@@ -348,14 +363,6 @@ impl Texture {
         a.lerp(b, dy)
     }
 
-    fn sample_point(&self, uv: Vec2) -> Vec3 {
-        let xy = uv * vec2(self.width as f32, self.height as f32)
-            - vec2(0.5, 0.5);
-        let i = xy.x.round() as i32;
-        let j = xy.y.round() as i32;
-        self.get_wrapped(i, j)
-    }
-
     fn sample_linear(&self, uv: Vec2) -> Vec3 {
         let xy = uv * vec2(self.width as f32, self.height as f32)
             - vec2(0.5, 0.5);
@@ -384,53 +391,70 @@ struct Raytracer {
 impl Raytracer {
     fn new(width: i32, height: i32) -> Self {
         let sphere1 = Arc::new(Sphere {
-            center: vec3(1.0, 0.0, 1.5),
-            radius: 0.8,
-            amb: vec3(0.2, 0.2, 0.2),
-            diff: vec3(1.0, 0.2, 0.2),
-            spec: vec3(0.5, 0.5, 0.5),
+            center: vec3(0.0, -0.1, 1.5),
+            radius: 1.0,
+            amb: vec3(0.1, 0.1, 0.1),
+            diff: vec3(1.0, 0.0, 0.0),
+            spec: vec3(1.0, 1.0, 1.0),
             alpha: 10.0,
+            reflection: 0.5,
+            transparency: 0.0,
         });
 
-        let square = Arc::new(Square {
+        let sphere2 = Arc::new(Sphere {
+            center: vec3(1.2, -0.1, 0.5),
+            radius: 0.4,
+            amb: Vec3::ZERO,
+            diff: vec3(0.0, 0.0, 1.0),
+            spec: vec3(1.0, 1.0, 1.0),
+            alpha: 50.0,
+            reflection: 0.5,
+            transparency: 0.0,
+        });
+
+        let ground_texture_bytes =
+            include_bytes!("../assets/shadertoy_abstract1.jpg");
+        let ground_image =
+            image::load_from_memory(ground_texture_bytes).unwrap();
+        let ground_texture =
+            Arc::new(Texture::from_dynamic_image(ground_image));
+
+        let ground = Arc::new(Square {
             triangle1: Triangle {
-                v0: vec3(-2.0, 2.0, 2.0),
-                v1: vec3(2.0, 2.0, 2.0),
-                v2: vec3(2.0, -2.0, 2.0),
+                v0: vec3(-10.0, -1.2, 0.0),
+                v1: vec3(-10.0, -1.2, 10.0),
+                v2: vec3(10.0, -1.2, 10.0),
                 uv0: vec2(0.0, 0.0),
                 uv1: vec2(1.0, 0.0),
                 uv2: vec2(1.0, 1.0),
-                amb: vec3(0.2, 0.2, 0.2),
-                diff: vec3(1.0, 1.0, 1.0),
-                spec: vec3(0.0, 0.0, 0.0),
-                alpha: 10.0,
-                amb_texture: None,
-                diff_texture: None,
             },
             triangle2: Triangle {
-                v0: vec3(-2.0, 2.0, 2.0),
-                v1: vec3(2.0, -2.0, 2.0),
-                v2: vec3(-2.0, -2.0, 2.0),
+                v0: vec3(-10.0, -1.2, 0.0),
+                v1: vec3(10.0, -1.2, 10.0),
+                v2: vec3(10.0, -1.2, 0.0),
                 uv0: vec2(0.0, 0.0),
                 uv1: vec2(1.0, 1.0),
                 uv2: vec2(0.0, 1.0),
-                amb: vec3(0.2, 0.2, 0.2),
-                diff: vec3(1.0, 1.0, 1.0),
-                spec: vec3(0.0, 0.0, 0.0),
-                alpha: 10.0,
-                amb_texture: None,
-                diff_texture: None,
             },
+            amb: vec3(1.0, 1.0, 1.0),
+            diff: vec3(1.0, 1.0, 1.0),
+            spec: vec3(1.0, 1.0, 1.0),
+            alpha: 10.0,
+            reflection: 0.5,
+            transparency: 0.0,
+            amb_texture: Some(ground_texture.clone()),
+            diff_texture: Some(ground_texture),
         });
 
-        let objects: Vec<Arc<dyn Object>> = vec![sphere1, square];
+        let objects: Vec<Arc<dyn Object>> =
+            vec![sphere1, sphere2, ground];
 
         Self {
             width,
             height,
             objects,
             light: Light {
-                pos: vec3(0.0, 1.0, 0.5),
+                pos: vec3(0.0, 0.5, -0.5),
             },
         }
     }
@@ -456,86 +480,76 @@ impl Raytracer {
         closest_hit
     }
 
-    fn trace_ray(&self, ray: &Ray) -> Vec3 {
+    fn trace_ray(&self, ray: &Ray, recurse_level: i32) -> Vec3 {
+        // 빛의 반사 횟수가 level보다 작으면 검은색 반환
+        if recurse_level < 0 {
+            return Vec3::ZERO;
+        }
+
+        // 광선과 가장 가까운 물체와의 충돌 정보 찾기
         let hit = self.find_closest_collision(ray);
 
+        // 충돌한 물체가 있으면 phong shading, 다른물체로의 반사 계산
         if let Some(obj) = hit.object {
-            let mut color;
+            // 초기화
+            let mut color = Vec3::ZERO;
 
-            // Ambient
-            if let Some(tex) = obj.amb_texture() {
-                color = obj.ambient() * tex.sample_linear(hit.uv);
-            } else {
-                color = obj.ambient();
-            }
-
+            // 주변광, 확산광, 반사광
             let dir_to_light =
                 (self.light.pos - hit.point).normalize();
-            let diff_intensity =
-                hit.normal.dot(dir_to_light).max(0.0);
 
-            // Diffuse
-            if let Some(tex) = obj.diff_texture() {
-                color += obj.diffuse()
-                    * diff_intensity
-                    * tex.sample_linear(hit.uv);
-            } else {
-                color += obj.diffuse() * diff_intensity;
-            }
-
-            // Specular
+            let mut phong_color = Vec3::ZERO;
+            let diff = hit.normal.dot(dir_to_light).max(0.0);
             let reflect_dir =
-                2.0 * hit.normal.dot(dir_to_light) * hit.normal
+                2.0 * hit.normal * hit.normal.dot(dir_to_light)
                     - dir_to_light;
             let specular = (-ray.direction)
                 .dot(reflect_dir)
                 .max(0.0)
                 .powf(obj.alpha());
-            color += obj.specular() * specular;
+
+            if let Some(tex) = obj.amb_texture() {
+                phong_color +=
+                    obj.ambient() * tex.sample_linear(hit.uv);
+            } else {
+                phong_color += obj.ambient();
+            }
+
+            if let Some(tex) = obj.diff_texture() {
+                phong_color +=
+                    diff * obj.diffuse() * tex.sample_linear(hit.uv);
+            } else {
+                phong_color += diff * obj.diffuse();
+            }
+
+            phong_color += obj.specular() * specular;
+
+            color += phong_color
+                * (1.0 - obj.reflection() - obj.transparency());
+
+            // 다른 물체로의 반사광
+            if obj.reflection() > 0.0 {
+                // 반사광 계산과 동일하게 (R = I - 2*dot(I,N)*N)을 이용해 반사 광선 방향 계산
+                let reflected_direction = (ray.direction
+                    - 2.0
+                        * ray.direction.dot(hit.normal)
+                        * hit.normal)
+                    .normalize();
+                // shadow acne(부동소수점 오차로 인한 오류) 방지
+                let reflection_ray = Ray {
+                    origin: hit.point + reflected_direction * 1e-4,
+                    direction: reflected_direction,
+                };
+                // 반사광을 재귀적으로 추적하고 결과값에 반사율을 곱해 최종 색상에 더하기
+                color += self
+                    .trace_ray(&reflection_ray, recurse_level - 1)
+                    * obj.reflection();
+            }
 
             color
         } else {
-            vec3(0.0, 0.0, 0.0)
+            Vec3::ZERO
         }
-    }
-
-    // 슈퍼샘플링을 위한 재귀 함수
-    fn trace_ray_2x2(
-        &self,
-        eye_pos: Vec3,
-        pixel_pos: Vec3,
-        dx: f32,
-        recursive_level: i32,
-    ) -> Vec3 {
-        if recursive_level == 0 {
-            let ray = Ray {
-                origin: pixel_pos,
-                direction: (pixel_pos - eye_pos).normalize(),
-            };
-            return self.trace_ray(&ray);
-        }
-
-        let sub_dx = 0.5 * dx;
-        let mut pixel_color = Vec3::ZERO;
-
-        // 현재 픽셀을 2x2 서브픽셀로 나누어 각각 광선을 쏨
-        for j in 0..2 {
-            for i in 0..2 {
-                let sub_pos = vec3(
-                    pixel_pos.x + (i as f32 - 0.5) * sub_dx,
-                    pixel_pos.y + (j as f32 - 0.5) * sub_dx,
-                    pixel_pos.z,
-                );
-                pixel_color += self.trace_ray_2x2(
-                    eye_pos,
-                    sub_pos,
-                    sub_dx,
-                    recursive_level - 1,
-                );
-            }
-        }
-
-        pixel_color * 0.25 // 4개 서브픽셀 색상의 평균
     }
 
     fn transform_screen_to_world(&self, pos_screen: Vec2) -> Vec3 {
@@ -559,21 +573,12 @@ impl Raytracer {
 
             let pos_world = self
                 .transform_screen_to_world(vec2(i as f32, j as f32));
-
-            // 슈퍼샘플링 적용-
-            // 1. 픽셀당 광선 하나(슈퍼샘플링 적용X)
             let ray_dir = (pos_world - eye_pos).normalize();
             let pixel_ray = Ray {
-                origin: eye_pos,
+                origin: pos_world,
                 direction: ray_dir,
             };
-            // let color_vec = self.trace_ray(&pixel_ray);
-
-            // 2. 2x2 슈퍼샘플링
-            // (픽셀중심좌표를 기준으로 픽셀을 네개로 분할해서 광선을 쏜 뒤 평균값으로 렌더링)
-            let dx = 2.0 / self.height as f32;
-            let color_vec =
-                self.trace_ray_2x2(eye_pos, pos_world, dx, 1);
+            let color_vec = self.trace_ray(&pixel_ray, 5);
 
             *pixel = Color32::from_rgb(
                 (color_vec.x.clamp(0.0, 1.0) * 255.0) as u8,
@@ -597,7 +602,8 @@ pub struct TemplateApp {
 impl Default for TemplateApp {
     fn default() -> Self {
         Self {
-            raytracer: Raytracer::new(1280 / 2, 720 / 2),
+            //해상도
+            raytracer: Raytracer::new(1280, 720),
             is_first_frame: true,
         }
     }
@@ -618,17 +624,12 @@ impl eframe::App for TemplateApp {
         _frame: &mut eframe::Frame,
     ) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            let available_size = ui.available_size();
-            /* 렌더링 해상도를 창 크기에 맞추지 않고, 생성자에서 설정한 값으로 고정함 */
-            /* self.raytracer.width = available_size.x as i32; */
-            /* self.raytracer.height = available_size.y as i32; */
-
             let width = self.raytracer.width as usize;
             let height = self.raytracer.height as usize;
 
-            /* 첫 프레임에만 렌더링을 수행하여 결과를 텍스처에 저장함 */
             if self.is_first_frame {
-                let mut pixels: Vec<Color32> = vec![Color32::BLACK; width * height];
+                let mut pixels: Vec<Color32> =
+                    vec![Color32::BLACK; width * height];
                 self.raytracer.render(&mut pixels);
 
                 let image = egui::ColorImage::from_rgba_unmultiplied(
@@ -636,27 +637,29 @@ impl eframe::App for TemplateApp {
                     bytemuck::cast_slice(&pixels),
                 );
 
-                /* 렌더링된 이미지를 egui 컨텍스트 메모리에 저장 */
                 ctx.memory_mut(|mem| {
-                    mem.data.insert_temp(egui::Id::new("raytrace_texture"), image)
+                    mem.data.insert_temp(
+                        egui::Id::new("raytrace_texture"),
+                        image,
+                    )
                 });
 
                 self.is_first_frame = false;
             }
 
-            /* 매 프레임 저장된 이미지를 불러와 화면에 그림 */
-            if let Some(texture) =
-                ctx.memory(|mem| mem.data.get_temp::<egui::ColorImage>(egui::Id::new("raytrace_texture")))
-            {
+            if let Some(texture) = ctx.memory(|mem| {
+                mem.data.get_temp::<egui::ColorImage>(egui::Id::new(
+                    "raytrace_texture",
+                ))
+            }) {
                 let texture_handle = ctx.load_texture(
                     "raytrace_canvas",
                     texture.clone(),
                     TextureOptions::NEAREST,
                 );
-                /* 이미지를 UI에 맞게 크기를 조절하여 표시 */
-               let image = egui::Image::new(&texture_handle)
-                    .fit_to_original_size(1.0) // 원본 종횡비 유지
-                    .shrink_to_fit(); // UI 공간에 맞게 축소
+                let image = egui::Image::new(&texture_handle)
+                    .fit_to_original_size(1.0)
+                    .shrink_to_fit();
                 ui.centered_and_justified(|ui| {
                     ui.add(image);
                 });
