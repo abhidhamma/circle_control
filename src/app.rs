@@ -131,154 +131,6 @@ impl Object for Sphere {
     }
 }
 
-// 삼각형(Triangle)을 나타내는 구조체
-// C++: Triangle 클래스
-struct Triangle {
-    v0: Vec3,
-    v1: Vec3,
-    v2: Vec3,
-    uv0: Vec2,
-    uv1: Vec2,
-    uv2: Vec2,
-}
-
-impl Triangle {
-    // 광선과 삼각형 교점 찾기 (Möller–Trumbore intersection algorithm과 유사한 기하학적 해법)
-    // C++: IntersectRayTriangle 함수
-    fn intersect_ray_triangle(
-        &self,
-        ray: &Ray,
-    ) -> Option<(f32, Vec3, Vec3, f32, f32)> {
-        let face_normal =
-            (self.v1 - self.v0).cross(self.v2 - self.v0).normalize();
-
-        // Backface culling: 삼각형 뒷면은 그리지 않음
-        if (-ray.direction).dot(face_normal) < 0.0 {
-            return None;
-        }
-
-        // 평면과 광선이 거의 평행하면 충돌하지 않음
-        if ray.direction.dot(face_normal).abs() < 1e-2 {
-            return None;
-        }
-
-        // 광선과 평면의 교점 계산
-        let t = (self.v0.dot(face_normal)
-            - ray.origin.dot(face_normal))
-            / ray.direction.dot(face_normal);
-
-        if t < 0.0 {
-            return None;
-        }
-
-        let point = ray.origin + t * ray.direction;
-
-        // 교점이 삼각형 내부에 있는지 확인 (Inside-Outside Test)
-        let cross0 = (point - self.v2).cross(self.v1 - self.v2);
-        let cross1 = (point - self.v0).cross(self.v2 - self.v0);
-        let cross2 = (self.v1 - self.v0).cross(point - self.v0);
-
-        if cross0.dot(face_normal) < 0.0
-            || cross1.dot(face_normal) < 0.0
-            || cross2.dot(face_normal) < 0.0
-        {
-            return None;
-        }
-
-        // 무게중심 좌표(Barycentric coordinates) 계산. 텍스처 좌표 보간에 사용
-        let area0 = cross0.length() * 0.5;
-        let area1 = cross1.length() * 0.5;
-        let area_sum =
-            (self.v1 - self.v0).cross(self.v2 - self.v0).length()
-                * 0.5;
-
-        let w0 = area0 / area_sum;
-        let w1 = area1 / area_sum;
-
-        Some((t, point, face_normal, w0, w1))
-    }
-}
-
-// 사각형(Square)을 나타내는 구조체
-// C++: Square 클래스
-struct Square {
-    triangle1: Triangle,
-    triangle2: Triangle,
-    amb: Vec3,
-    diff: Vec3,
-    spec: Vec3,
-    alpha: f32,
-    reflection: f32,
-    transparency: f32,
-    amb_texture: Option<Arc<Texture>>,
-    diff_texture: Option<Arc<Texture>>,
-}
-
-impl Object for Square {
-    fn check_ray_collision(&self, ray: &Ray) -> Hit {
-        let hit1 = self.triangle1.intersect_ray_triangle(ray);
-        let hit2 = self.triangle2.intersect_ray_triangle(ray);
-
-        let best_hit = match (hit1, hit2) {
-            (Some(h1), Some(h2)) => {
-                if h1.0 < h2.0 {
-                    Some((h1, &self.triangle1))
-                } else {
-                    Some((h2, &self.triangle2))
-                }
-            }
-            (Some(h1), None) => Some((h1, &self.triangle1)),
-            (None, Some(h2)) => Some((h2, &self.triangle2)),
-            (None, None) => None,
-        };
-
-        if let Some(((t, point, normal, w0, w1), tri)) = best_hit {
-            let w2 = 1.0 - w0 - w1;
-            let uv = tri.uv0 * w0 + tri.uv1 * w1 + tri.uv2 * w2;
-            Hit {
-                distance: t,
-                point,
-                normal,
-                uv,
-                object: None,
-            }
-        } else {
-            Hit {
-                distance: -1.0,
-                point: Vec3::ZERO,
-                normal: Vec3::ZERO,
-                uv: Vec2::ZERO,
-                object: None,
-            }
-        }
-    }
-
-    fn ambient(&self) -> Vec3 {
-        self.amb
-    }
-    fn diffuse(&self) -> Vec3 {
-        self.diff
-    }
-    fn specular(&self) -> Vec3 {
-        self.spec
-    }
-    fn alpha(&self) -> f32 {
-        self.alpha
-    }
-    fn reflection(&self) -> f32 {
-        self.reflection
-    }
-    fn transparency(&self) -> f32 {
-        self.transparency
-    }
-    fn amb_texture(&self) -> Option<Arc<Texture>> {
-        self.amb_texture.clone()
-    }
-    fn diff_texture(&self) -> Option<Arc<Texture>> {
-        self.diff_texture.clone()
-    }
-}
-
 // 점 광원(Point Light)을 나타내는 구조체
 // C++: Light 클래스
 struct Light {
@@ -358,6 +210,121 @@ impl Texture {
     }
 }
 
+// 큐브맵의 각 면을 나타내는 enum
+enum CubemapFace {
+    PositiveX, // px
+    NegativeX, // nx
+    PositiveY, // py
+    NegativeY, // ny
+    PositiveZ, // pz
+    NegativeZ, // nz
+}
+
+impl CubemapFace {
+    // 각 면에 해당하는 파일 이름을 반환
+    fn filename(&self) -> &'static str {
+        match self {
+            CubemapFace::PositiveX => "px.png",
+            CubemapFace::NegativeX => "nx.png",
+            CubemapFace::PositiveY => "py.jpg",
+            CubemapFace::NegativeY => "ny.jpg",
+            CubemapFace::PositiveZ => "pz.png",
+            CubemapFace::NegativeZ => "nz.png",
+        }
+    }
+
+    // 컴파일 타임에 이미지 데이터를 포함시켜 반환
+    fn bytes(&self) -> &'static [u8] {
+        match self {
+            CubemapFace::PositiveX => {
+                include_bytes!("../assets/cubemap/px.png")
+            }
+            CubemapFace::NegativeX => {
+                include_bytes!("../assets/cubemap/nx.png")
+            }
+            CubemapFace::PositiveY => {
+                include_bytes!("../assets/cubemap/py.jpg")
+            }
+            CubemapFace::NegativeY => {
+                include_bytes!("../assets/cubemap/ny.jpg")
+            }
+            CubemapFace::PositiveZ => {
+                include_bytes!("../assets/cubemap/pz.png")
+            }
+            CubemapFace::NegativeZ => {
+                include_bytes!("../assets/cubemap/nz.png")
+            }
+        }
+    }
+}
+
+// 큐브맵 구조체
+struct Cubemap {
+    faces: [Arc<Texture>; 6], // [px, nx, py, ny, pz, nz]
+}
+
+impl Cubemap {
+    // C++: Cubemap::Cubemap(const char* folder)
+    fn load() -> Self {
+        const FACES: [CubemapFace; 6] = [
+            CubemapFace::PositiveX,
+            CubemapFace::NegativeX,
+            CubemapFace::PositiveY,
+            CubemapFace::NegativeY,
+            CubemapFace::PositiveZ,
+            CubemapFace::NegativeZ,
+        ];
+
+        let faces: [Arc<Texture>; 6] = FACES.map(|face| {
+            let image_bytes = face.bytes();
+            let img = image::load_from_memory(image_bytes)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to load image {}: {}",
+                        face.filename(),
+                        e
+                    )
+                });
+            Arc::new(Texture::from_dynamic_image(img))
+        });
+
+        Self { faces }
+    }
+
+    // C++: Cubemap::Sample(const vec3& d)
+    fn sample(&self, dir: Vec3) -> Vec3 {
+        let abs_dir = dir.abs();
+        let (face_index, uv) = if abs_dir.x >= abs_dir.y
+            && abs_dir.x >= abs_dir.z
+        {
+            // x-face
+            if dir.x > 0.0 {
+                (0, vec2(-dir.z / dir.x, -dir.y / dir.x)) // px
+            } else {
+                (1, vec2(dir.z / dir.x, -dir.y / dir.x)) // nx
+            }
+        } else if abs_dir.y >= abs_dir.x && abs_dir.y >= abs_dir.z {
+            // y-face
+            if dir.y > 0.0 {
+                (2, vec2(dir.x / dir.y, dir.z / dir.y)) // py
+            } else {
+                (3, vec2(dir.x / dir.y, -dir.z / dir.y)) // ny
+            }
+        } else {
+            // z-face
+            if dir.z > 0.0 {
+                (4, vec2(dir.x / dir.z, -dir.y / dir.z)) // pz
+            } else {
+                (5, vec2(-dir.x / dir.z, -dir.y / dir.z)) // nz
+            }
+        };
+
+        // [-1, 1] 범위를 [0, 1] 범위로 변환
+        let final_uv = (uv + Vec2::ONE) * 0.5;
+        self.faces[face_index].sample_linear(final_uv)
+    }
+}
+
 // 레이 트레이서
 // C++: Raytracer 클래스
 struct Raytracer {
@@ -365,98 +332,33 @@ struct Raytracer {
     height: i32,
     objects: Vec<Arc<dyn Object>>,
     light: Light,
+    cubemap: Cubemap,
 }
 
 impl Raytracer {
     fn new(width: i32, height: i32) -> Self {
         let sphere1 = Arc::new(Sphere {
-            center: vec3(0.0, -0.1, 1.5),
+            center: vec3(0.0, 0.0, 1.5),
             radius: 1.0,
-            amb: vec3(0.2, 0.2, 0.2),
-            diff: vec3(0.0, 0.0, 1.0),
-            spec: Vec3::ZERO,
-            alpha: 50.0,
-            reflection: 0.0,
-            transparency: 1.0, // 굴절을 위해 투명하게 설정
-        });
-
-        let ground_texture_bytes =
-            include_bytes!("../assets/shadertoy_abstract1.jpg");
-        let ground_image =
-            image::load_from_memory(ground_texture_bytes).unwrap();
-        let ground_texture =
-            Arc::new(Texture::from_dynamic_image(ground_image));
-
-        let ground = Arc::new(Square {
-            triangle1: Triangle {
-                v0: vec3(-10.0, -1.5, 0.0),
-                v1: vec3(-10.0, -1.5, 10.0),
-                v2: vec3(10.0, -1.5, 10.0),
-                uv0: vec2(0.0, 0.0),
-                uv1: vec2(1.0, 0.0),
-                uv2: vec2(1.0, 1.0),
-            },
-            triangle2: Triangle {
-                v0: vec3(-10.0, -1.5, 0.0),
-                v1: vec3(10.0, -1.5, 10.0),
-                v2: vec3(10.0, -1.5, 0.0),
-                uv0: vec2(0.0, 0.0),
-                uv1: vec2(1.0, 1.0),
-                uv2: vec2(0.0, 1.0),
-            },
-            amb: vec3(1.0, 1.0, 1.0),
-            diff: vec3(1.0, 1.0, 1.0),
-            spec: vec3(1.0, 1.0, 1.0),
-            alpha: 10.0,
-            reflection: 0.0,
-            transparency: 0.0,
-            amb_texture: Some(ground_texture.clone()),
-            diff_texture: Some(ground_texture),
-        });
-
-        let back_texture_bytes = include_bytes!("../assets/back.jpg");
-        let back_image =
-            image::load_from_memory(back_texture_bytes).unwrap();
-        let back_texture =
-            Arc::new(Texture::from_dynamic_image(back_image));
-
-        let back_square = Arc::new(Square {
-            triangle1: Triangle {
-                v0: vec3(-10.0, 10.0, 10.0),
-                v1: vec3(10.0, 10.0, 10.0),
-                v2: vec3(10.0, -10.0, 10.0),
-                uv0: vec2(0.0, 0.0),
-                uv1: vec2(1.0, 0.0),
-                uv2: vec2(1.0, 1.0),
-            },
-            triangle2: Triangle {
-                v0: vec3(-10.0, 10.0, 10.0),
-                v1: vec3(10.0, -10.0, 10.0),
-                v2: vec3(-10.0, -10.0, 10.0),
-                uv0: vec2(0.0, 0.0),
-                uv1: vec2(1.0, 1.0),
-                uv2: vec2(0.0, 1.0),
-            },
-            amb: vec3(1.0, 1.0, 1.0),
+            amb: vec3(0.0, 0.0, 0.0),
             diff: vec3(0.0, 0.0, 0.0),
-            spec: Vec3::ZERO,
-            alpha: 10.0,
-            reflection: 0.0,
+            spec: vec3(0.2, 0.2, 0.2),
+            alpha: 1000.0,
+            reflection: 0.9, // 반사율을 높여 주변을 잘 비추도록 설정
             transparency: 0.0,
-            amb_texture: Some(back_texture.clone()),
-            diff_texture: Some(back_texture),
         });
 
-        let objects: Vec<Arc<dyn Object>> =
-            vec![sphere1, ground, back_square];
+        let objects: Vec<Arc<dyn Object>> = vec![sphere1];
+        let cubemap = Cubemap::load();
 
         Self {
             width,
             height,
             objects,
             light: Light {
-                pos: vec3(0.0, 0.3, -0.5),
+                pos: vec3(0.0, 5.0, -5.0),
             },
+            cubemap,
         }
     }
 
@@ -482,7 +384,13 @@ impl Raytracer {
         closest_hit
     }
 
-    // C++: traceRay 함수
+    /*
+        광추적
+        1.물체에 부딪치는 빛
+        2.물체외부에서 반사되는 빛
+        3.물체내부로 굴절되는 빛
+        세가지를 계산
+    */
     fn trace_ray(&self, ray: &Ray, recurse_level: i32) -> Vec3 {
         if recurse_level < 0 {
             return Vec3::ZERO;
@@ -491,6 +399,7 @@ impl Raytracer {
         let hit = self.find_closest_collision(ray);
 
         if let Some(obj) = hit.object {
+            // 1.물체에 부딪치는 빛
             let mut color = Vec3::ZERO;
             let dir_to_light =
                 (self.light.pos - hit.point).normalize();
@@ -522,6 +431,7 @@ impl Raytracer {
             color += phong_color
                 * (1.0 - obj.reflection() - obj.transparency());
 
+            // 2.물체외부에서 반사되는 빛
             if obj.reflection() > 0.0 {
                 let reflected_direction = (ray.direction
                     - 2.0
@@ -537,93 +447,36 @@ impl Raytracer {
                     * obj.reflection();
             }
 
-            // ==================================================================
-            // 여기가 핵심! 굴절(Refraction) 구현 부분입니다.
-            // ==================================================================
+            // 3.물체내부로 굴절되는 빛(굴절)
             if obj.transparency() > 0.0 {
-                /*
-                 * ### 굴절(Refraction) 원리 (스넬의 법칙, Snell's Law)
-                 * 빛이 서로 다른 매질(공기, 물, 유리 등)의 경계를 지날 때 꺾이는 현상입니다.
-                 * 물리 법칙에 따라, 입사각(theta1)과 굴절각(theta2)의 사인(sin) 값의 비율은
-                 * 두 매질의 굴절률(Index of Refraction, IOR) 비율과 같습니다.
-                 *
-                 * sin(theta1) / sin(theta2) = n2 / n1 = eta (η)
-                 *
-                 * 여기서 n1은 현재 매질의 굴절률, n2는 다음 매질의 굴절률입니다.
-                 * 우리는 이 공식을 사용해 굴절된 빛의 방향 벡터를 계산할 것입니다.
-                 */
                 const IOR: f32 = 1.5; // 굴절률 (유리)
-
-                /*
-                 * ### 바깥에서의 충돌과 안에서의 충돌
-                 * 광선이 물체 외부에서 내부로 들어가는지(공기->유리),
-                 * 또는 내부에서 외부로 나가는지(유리->공기)를 판단해야 합니다.
-                 *
-                 * - ray.direction.dot(hit.normal) < 0.0 : 광선이 표면의 앞면과 충돌 (밖 -> 안) /
-                 * - ray.direction.dot(hit.normal) > 0.0 : 광선이 표면의 뒷면과 충돌 (안 -> 밖) /
-                 *
-                 * C++ 예제에서는 구(Sphere)의 충돌 판정에서 두 개의 교점(d1, d2)을 모두 계산하고,
-                 * 광선이 구 내부에서 시작된 경우 더 먼 교점(d2)을 선택하는 방식으로 이를 처리했습니다.
-                 * 여기서는 더 직관적으로 법선 벡터(normal)와 에타(eta) 값을 조정하는 방식을 사용합니다.
-                 */
                 let (eta, normal) =
                     if ray.direction.dot(hit.normal) < 0.0 {
-                        // 광선이 밖에서 안으로 들어가는 경우 (예: 공기 -> 유리)
-                        (1.0 / IOR, hit.normal) // eta = n1(공기)/n2(유리) ~= 1.0 / 1.5
+                        (1.0 / IOR, hit.normal)
                     } else {
-                        // 광선이 안에서 밖으로 나가는 경우 (예: 유리 -> 공기)
-                        (IOR, -hit.normal) // eta = n1(유리)/n2(공기) ~= 1.5 / 1.0, 법선 벡터를 뒤집어 광선과 같은 방향을 보게 함
+                        (IOR, -hit.normal)
                     };
 
-                /*
-                 * ### 굴절 벡터 계산 유도
-                 * 굴절된 방향 벡터 t를 구하기 위해 삼각함수를 사용합니다.
-                 * d: 입사 방향 벡터, n: 법선 벡터, t: 굴절 방향 벡터
-                 *
-                 * 1. cos(theta1) 계산:
-                 *    cos(theta1) = dot(-d, n)
-                 *
-                 * 2. sin(theta1) 계산:
-                 *    sin^2(theta) = 1 - cos^2(theta) 를 이용
-                 *
-                 * 3. sin(theta2) 계산:
-                 *    스넬의 법칙: sin(theta2) = sin(theta1) * eta
-                 *
-                 * 4. cos(theta2) 계산:
-                 *    sin^2(theta2) + cos^2(theta2) = 1 이용
-                 *
-                 * 5. 굴절 벡터 t 계산:
-                 *    t = n * (-cos(theta2)) + m * sin(theta2)
-                 *    여기서 m은 법선에 수직인 접선 방향 벡터입니다.
-                 *    m = normalize(d + n * cos(theta1))
-                 *    이 식들을 조합하고 정리하면 아래와 같은 최종 굴절 벡터 공식을 얻을 수 있습니다.
-                 *    t = eta * d + (eta * cos(theta1) - cos(theta2)) * n
-                 */
                 let cos_theta1 = (-ray.direction).dot(normal);
                 let sin2_theta1 = 1.0 - cos_theta1 * cos_theta1;
                 let sin2_theta2 = sin2_theta1 * eta * eta;
 
-                // 전반사(Total Internal Reflection) 체크
-                // sin(theta2)가 1보다 크면 빛이 굴절하지 않고 모두 반사됩니다.
                 if sin2_theta2 < 1.0 {
                     let cos_theta2 = (1.0 - sin2_theta2).sqrt();
                     let refracted_direction = (ray.direction * eta
                         + normal * (eta * cos_theta1 - cos_theta2))
                         .normalize();
 
-                    // 부동소수점 오류를 피하기 위해 살짝 떨어진 위치에서 새로운 광선 시작
                     let refraction_ray = Ray {
                         origin: hit.point
                             + refracted_direction * 1e-4,
                         direction: refracted_direction,
                     };
-                    // 재귀적으로 굴절된 광선을 추적하고, 투명도를 곱해 색상에 더함
                     color += self.trace_ray(
                         &refraction_ray,
                         recurse_level - 1,
                     ) * obj.transparency();
                 } else {
-                    // 전반사가 일어날 경우, 빛은 모두 반사됨 (Fresnel 효과를 단순화)
                     let reflected_direction = (ray.direction
                         - 2.0
                             * ray.direction.dot(hit.normal)
@@ -642,7 +495,8 @@ impl Raytracer {
             }
             color
         } else {
-            Vec3::ZERO
+            // 광선이 어떤 물체와도 충돌하지 않으면 큐브맵에서 색상을 샘플링
+            self.cubemap.sample(ray.direction)
         }
     }
 
