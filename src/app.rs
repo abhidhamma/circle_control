@@ -1,5 +1,7 @@
 use eframe::egui;
-use egui::{Color32, TextureOptions};
+use egui::{
+    Color32, PointerButton, TextureOptions, Vec2 as EguiVec2,
+};
 use glam::{Vec2, Vec3, vec2, vec3};
 use image::GenericImageView;
 use rayon::prelude::*;
@@ -212,47 +214,47 @@ impl Texture {
 
 // 큐브맵의 각 면을 나타내는 enum
 enum CubemapFace {
-    PositiveX, // px
-    NegativeX, // nx
-    PositiveY, // py
-    NegativeY, // ny
-    PositiveZ, // pz
-    NegativeZ, // nz
+    Right, // PositiveX (px)
+    Left,  // NegativeX (nx)
+    Up,    // PositiveY (py)
+    Down,  // NegativeY (ny)
+    Back,  // PositiveZ (pz)
+    Front, // NegativeZ (nz)
 }
 
 impl CubemapFace {
     // 각 면에 해당하는 파일 이름을 반환
     fn filename(&self) -> &'static str {
         match self {
-            CubemapFace::PositiveX => "px.png",
-            CubemapFace::NegativeX => "nx.png",
-            CubemapFace::PositiveY => "py.jpg",
-            CubemapFace::NegativeY => "ny.jpg",
-            CubemapFace::PositiveZ => "pz.png",
-            CubemapFace::NegativeZ => "nz.png",
+            CubemapFace::Right => "right.png",
+            CubemapFace::Left => "left.png",
+            CubemapFace::Up => "up.png",
+            CubemapFace::Down => "down.png",
+            CubemapFace::Back => "back.png",
+            CubemapFace::Front => "front.png",
         }
     }
 
     // 컴파일 타임에 이미지 데이터를 포함시켜 반환
     fn bytes(&self) -> &'static [u8] {
         match self {
-            CubemapFace::PositiveX => {
-                include_bytes!("../assets/cubemap/px.png")
+            CubemapFace::Right => {
+                include_bytes!("../assets/cubemap/right.png")
             }
-            CubemapFace::NegativeX => {
-                include_bytes!("../assets/cubemap/nx.png")
+            CubemapFace::Left => {
+                include_bytes!("../assets/cubemap/left.png")
             }
-            CubemapFace::PositiveY => {
-                include_bytes!("../assets/cubemap/py.jpg")
+            CubemapFace::Up => {
+                include_bytes!("../assets/cubemap/up.png")
             }
-            CubemapFace::NegativeY => {
-                include_bytes!("../assets/cubemap/ny.jpg")
+            CubemapFace::Down => {
+                include_bytes!("../assets/cubemap/down.png")
             }
-            CubemapFace::PositiveZ => {
-                include_bytes!("../assets/cubemap/pz.png")
+            CubemapFace::Back => {
+                include_bytes!("../assets/cubemap/back.png")
             }
-            CubemapFace::NegativeZ => {
-                include_bytes!("../assets/cubemap/nz.png")
+            CubemapFace::Front => {
+                include_bytes!("../assets/cubemap/front.png")
             }
         }
     }
@@ -267,12 +269,12 @@ impl Cubemap {
     // C++: Cubemap::Cubemap(const char* folder)
     fn load() -> Self {
         const FACES: [CubemapFace; 6] = [
-            CubemapFace::PositiveX,
-            CubemapFace::NegativeX,
-            CubemapFace::PositiveY,
-            CubemapFace::NegativeY,
-            CubemapFace::PositiveZ,
-            CubemapFace::NegativeZ,
+            CubemapFace::Right,
+            CubemapFace::Left,
+            CubemapFace::Up,
+            CubemapFace::Down,
+            CubemapFace::Back,
+            CubemapFace::Front,
         ];
 
         let faces: [Arc<Texture>; 6] = FACES.map(|face| {
@@ -297,31 +299,69 @@ impl Cubemap {
         let (face_index, uv) = if abs_dir.x >= abs_dir.y
             && abs_dir.x >= abs_dir.z
         {
-            // x-face
+            // x-face (Right/Left)
             if dir.x > 0.0 {
-                (0, vec2(-dir.z / dir.x, -dir.y / dir.x)) // px
+                (0, vec2(-dir.z / dir.x, -dir.y / dir.x)) // Right (px)
             } else {
-                (1, vec2(dir.z / dir.x, -dir.y / dir.x)) // nx
+                (1, vec2(dir.z / dir.x, dir.y / dir.x)) // Left (nx)
             }
         } else if abs_dir.y >= abs_dir.x && abs_dir.y >= abs_dir.z {
-            // y-face
+            // y-face (Up/Down)
             if dir.y > 0.0 {
-                (2, vec2(dir.x / dir.y, dir.z / dir.y)) // py
+                (2, vec2(dir.x / dir.y, -dir.z / dir.y)) // Up (py)
             } else {
-                (3, vec2(dir.x / dir.y, -dir.z / dir.y)) // ny
+                (3, vec2(dir.x / dir.y, dir.z / dir.y)) // Down (ny)
             }
         } else {
-            // z-face
+            // z-face (Back/Front)
             if dir.z > 0.0 {
-                (4, vec2(dir.x / dir.z, -dir.y / dir.z)) // pz
+                (4, vec2(dir.x / dir.z, -dir.y / dir.z)) // Back (pz)
             } else {
-                (5, vec2(-dir.x / dir.z, -dir.y / dir.z)) // nz
+                (5, vec2(-dir.x / dir.z, dir.y / dir.z)) // Front (nz)
             }
         };
 
         // [-1, 1] 범위를 [0, 1] 범위로 변환
         let final_uv = (uv + Vec2::ONE) * 0.5;
         self.faces[face_index].sample_linear(final_uv)
+    }
+}
+
+// 카메라 구조체
+struct Camera {
+    eye: Vec3,
+    target: Vec3,
+    up: Vec3,
+    fov: f32, // 수직 시야각 (degrees)
+}
+
+impl Camera {
+    // 화면 좌표(i, j)와 화면 크기를 기반으로 주 광선(primary ray)을 생성
+    fn generate_ray(
+        &self,
+        i: f32,
+        j: f32,
+        width: i32,
+        height: i32,
+    ) -> Ray {
+        let forward = (self.target - self.eye).normalize();
+        let right = forward.cross(self.up).normalize();
+        let up = right.cross(forward);
+
+        let aspect_ratio = width as f32 / height as f32;
+        let fov_rad = self.fov.to_radians();
+        let sensor_height = 2.0 * (fov_rad / 2.0).tan();
+        let sensor_width = aspect_ratio * sensor_height;
+
+        let u = (i / width as f32 - 0.5) * sensor_width;
+        let v = -(j / height as f32 - 0.5) * sensor_height;
+
+        let direction = (forward + u * right + v * up).normalize();
+
+        Ray {
+            origin: self.eye,
+            direction,
+        }
     }
 }
 
@@ -500,34 +540,18 @@ impl Raytracer {
         }
     }
 
-    // C++: TransformScreenToWorld 함수
-    fn transform_screen_to_world(&self, pos_screen: Vec2) -> Vec3 {
-        let x_scale = 2.0 / self.width as f32;
-        let y_scale = 2.0 / self.height as f32;
-        let aspect = self.width as f32 / self.height as f32;
-
-        vec3(
-            (pos_screen.x * x_scale - 1.0) * aspect,
-            -pos_screen.y * y_scale + 1.0,
-            0.0,
-        )
-    }
-
     // C++: Render 함수
-    fn render(&mut self, pixels: &mut [Color32]) {
-        let eye_pos = vec3(0.0, 0.0, -1.5);
-
+    fn render(&self, pixels: &mut [Color32], camera: &Camera) {
         pixels.par_iter_mut().enumerate().for_each(|(idx, pixel)| {
             let i = idx % self.width as usize;
             let j = idx / self.width as usize;
 
-            let pos_world = self
-                .transform_screen_to_world(vec2(i as f32, j as f32));
-            let ray_dir = (pos_world - eye_pos).normalize();
-            let pixel_ray = Ray {
-                origin: pos_world,
-                direction: ray_dir,
-            };
+            let pixel_ray = camera.generate_ray(
+                i as f32,
+                j as f32,
+                self.width,
+                self.height,
+            );
             let color_vec = self.trace_ray(&pixel_ray, 5);
 
             *pixel = Color32::from_rgb(
@@ -545,14 +569,41 @@ pub struct TemplateApp {
     #[serde(skip)]
     raytracer: Raytracer,
     #[serde(skip)]
-    is_first_frame: bool,
+    camera: Camera,
+    #[serde(skip)]
+    camera_radius: f32,
+    #[serde(skip)]
+    camera_theta: f32, // 수평각
+    #[serde(skip)]
+    camera_phi: f32, // 수직각
+    #[serde(skip)]
+    needs_rerender: bool,
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
+        let radius = 4.0;
+        let theta = -std::f32::consts::FRAC_PI_2; // -90도
+        let phi = std::f32::consts::FRAC_PI_2; // 90도
+
+        let camera = Camera {
+            eye: vec3(
+                radius * phi.sin() * theta.cos(),
+                radius * phi.cos(),
+                radius * phi.sin() * theta.sin(),
+            ) + vec3(0.0, 0.0, 1.5), // 구의 중심을 보도록 오프셋
+            target: vec3(0.0, 0.0, 1.5), // 구의 중심
+            up: Vec3::Y,
+            fov: 60.0,
+        };
+
         Self {
             raytracer: Raytracer::new(1280, 720),
-            is_first_frame: true,
+            camera,
+            camera_radius: radius,
+            camera_theta: theta,
+            camera_phi: phi,
+            needs_rerender: true, // 첫 프레임 렌더링 필요
         }
     }
 }
@@ -560,6 +611,22 @@ impl Default for TemplateApp {
 impl TemplateApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Default::default()
+    }
+
+    // 카메라 위치 업데이트
+    fn update_camera(&mut self) {
+        // 구의 중심을 기준으로 회전
+        let target = self.camera.target;
+        self.camera.eye = vec3(
+            self.camera_radius
+                * self.camera_phi.sin()
+                * self.camera_theta.cos(),
+            self.camera_radius * self.camera_phi.cos(),
+            self.camera_radius
+                * self.camera_phi.sin()
+                * self.camera_theta.sin(),
+        ) + target;
+        self.needs_rerender = true;
     }
 }
 
@@ -571,15 +638,47 @@ impl eframe::App for TemplateApp {
         ctx: &egui::Context,
         _frame: &mut eframe::Frame,
     ) {
+        // input 클로저 밖에서 pixels_per_point를 미리 가져옴
+        let ppp = ctx.pixels_per_point();
+
+        // 마우스 입력 처리
+        ctx.input(|i| {
+            // 마우스 휠로 줌인/줌아웃
+            if i.raw_scroll_delta.y != 0.0 {
+                self.camera_radius *=
+                    1.0 - i.raw_scroll_delta.y * 0.05;
+                self.camera_radius =
+                    self.camera_radius.clamp(2.0, 20.0);
+                self.update_camera();
+            }
+
+            // 마우스 드래그로 카메라 회전
+            if i.pointer.button_down(PointerButton::Primary) {
+                // 네이티브와 웹 환경의 픽셀 단위 차이를 보정
+                // ctx.pixels_per_point()를 곱해줘서 논리적 픽셀을 물리적 픽셀에 가깝게 만듬
+                let mut delta = i.pointer.delta();
+                delta *= ppp;
+                if delta != EguiVec2::ZERO {
+                    self.camera_theta -= delta.x * 0.01;
+                    self.camera_phi -= delta.y * 0.01;
+                    // 수직 각도를 제한하여 카메라가 거꾸로 뒤집히는 것을 방지
+                    self.camera_phi = self
+                        .camera_phi
+                        .clamp(0.1, std::f32::consts::PI - 0.1);
+                    self.update_camera();
+                }
+            }
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             let width = self.raytracer.width as usize;
             let height = self.raytracer.height as usize;
 
-            // C++의 `if (count == 0)` 와 같이 첫 프레임에만 렌더링
-            if self.is_first_frame {
+            // 카메라가 움직였을 때만 다시 렌더링
+            if self.needs_rerender {
                 let mut pixels: Vec<Color32> =
                     vec![Color32::BLACK; width * height];
-                self.raytracer.render(&mut pixels);
+                self.raytracer.render(&mut pixels, &self.camera);
 
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [width, height],
@@ -594,7 +693,8 @@ impl eframe::App for TemplateApp {
                     )
                 });
 
-                self.is_first_frame = false;
+                self.needs_rerender = false;
+                ctx.request_repaint(); // 다음 프레임에 다시 그리도록 요청
             }
 
             // 메모리에 저장된 이미지를 불러와서 화면에 표시
