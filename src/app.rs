@@ -541,18 +541,21 @@ impl Raytracer {
     }
 
     // C++: Render 함수
-    fn render(&self, pixels: &mut [Color32], camera: &Camera) {
+    fn render(
+        &self,
+        pixels: &mut [Color32],
+        camera: &Camera,
+        recurse_level: i32,
+        width: i32,
+        height: i32,
+    ) {
         pixels.par_iter_mut().enumerate().for_each(|(idx, pixel)| {
-            let i = idx % self.width as usize;
-            let j = idx / self.width as usize;
+            let i = idx % width as usize;
+            let j = idx / width as usize;
 
-            let pixel_ray = camera.generate_ray(
-                i as f32,
-                j as f32,
-                self.width,
-                self.height,
-            );
-            let color_vec = self.trace_ray(&pixel_ray, 5);
+            let pixel_ray = camera
+                .generate_ray(i as f32, j as f32, width, height);
+            let color_vec = self.trace_ray(&pixel_ray, recurse_level);
 
             *pixel = Color32::from_rgb(
                 (color_vec.x.clamp(0.0, 1.0) * 255.0) as u8,
@@ -578,6 +581,8 @@ pub struct TemplateApp {
     camera_phi: f32, // 수직각
     #[serde(skip)]
     needs_rerender: bool,
+    #[serde(skip)]
+    is_dragging: bool, // 사용자가 카메라를 드래그하고 있는지 여부
 }
 
 impl Default for TemplateApp {
@@ -604,6 +609,7 @@ impl Default for TemplateApp {
             camera_theta: theta,
             camera_phi: phi,
             needs_rerender: true, // 첫 프레임 렌더링 필요
+            is_dragging: false,
         }
     }
 }
@@ -639,6 +645,7 @@ impl eframe::App for TemplateApp {
         _frame: &mut eframe::Frame,
     ) {
         // input 클로저 밖에서 pixels_per_point를 미리 가져옴
+        let was_dragging = self.is_dragging;
         let ppp = ctx.pixels_per_point();
 
         // 마우스 입력 처리
@@ -652,11 +659,21 @@ impl eframe::App for TemplateApp {
                 self.update_camera();
             }
 
-            // 마우스 드래그로 카메라 회전
-            if i.pointer.button_down(PointerButton::Primary) {
+            // 마우스 좌클릭 또는 우클릭 드래그로 카메라 회전
+            if i.pointer.is_decidedly_dragging()
+                && (i.pointer.button_down(PointerButton::Primary)
+                    || i.pointer
+                        .button_down(PointerButton::Secondary))
+            {
+                self.is_dragging = true;
                 // 네이티브와 웹 환경의 픽셀 단위 차이를 보정
                 // ctx.pixels_per_point()를 곱해줘서 논리적 픽셀을 물리적 픽셀에 가깝게 만듬
                 let mut delta = i.pointer.delta();
+
+                // 우클릭 드래그일 때만 스케일링 보정 (더 부드러운 움직임을 위해)
+                if i.pointer.button_down(PointerButton::Secondary) {
+                    delta *= ppp;
+                }
                 delta *= ppp;
                 if delta != EguiVec2::ZERO {
                     self.camera_theta -= delta.x * 0.01;
@@ -667,21 +684,45 @@ impl eframe::App for TemplateApp {
                         .clamp(0.1, std::f32::consts::PI - 0.1);
                     self.update_camera();
                 }
+            } else {
+                self.is_dragging = false;
             }
         });
 
+        // 드래그가 끝나는 시점에 최종 렌더링을 예약
+        if was_dragging && !self.is_dragging {
+            self.needs_rerender = true;
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            let width = self.raytracer.width as usize;
-            let height = self.raytracer.height as usize;
+            // 대화형 모드(드래그 중)일 때 렌더링 옵션 조정
+            let (width, height, recurse_level) = if self.is_dragging {
+                // 속도를 위해 해상도를 1/4로, 재귀 깊이를 1로 줄임
+                (
+                    self.raytracer.width / 2,
+                    self.raytracer.height / 2,
+                    1,
+                )
+            } else {
+                // 최종 렌더링은 최고 품질로
+                (self.raytracer.width, self.raytracer.height, 5)
+            };
 
             // 카메라가 움직였을 때만 다시 렌더링
-            if self.needs_rerender {
+            // 드래그 중일 때는 매 프레임 렌더링
+            if self.needs_rerender || self.is_dragging {
                 let mut pixels: Vec<Color32> =
-                    vec![Color32::BLACK; width * height];
-                self.raytracer.render(&mut pixels, &self.camera);
+                    vec![Color32::BLACK; (width * height) as usize];
+                self.raytracer.render(
+                    &mut pixels,
+                    &self.camera,
+                    recurse_level,
+                    width,
+                    height,
+                );
 
                 let image = egui::ColorImage::from_rgba_unmultiplied(
-                    [width, height],
+                    [width as usize, height as usize],
                     bytemuck::cast_slice(&pixels),
                 );
 
